@@ -17,7 +17,6 @@
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform_win.h"
-#include "xenia/ui/virtual_key.h"
 #include "xenia/ui/windowed_app_context_win.h"
 
 namespace xe {
@@ -127,6 +126,19 @@ bool Win32Window::OnCreate() {
   EnableMMCSS();
   // Enable file dragging from external sources
   DragAcceptFiles(hwnd_, true);
+
+  // Enable raw input for mouse & keyboard
+  RAWINPUTDEVICE device;
+  device.usUsagePage = 0x01;  // HID_USAGE_PAGE_GENERIC
+  device.usUsage = 0x02;      // HID_USAGE_GENERIC_MOUSE
+  device.dwFlags = 0;
+  device.hwndTarget = 0;
+  RegisterRawInputDevices(&device, 1, sizeof(RAWINPUTDEVICE));
+  device.usUsagePage = 0x01;  // HID_USAGE_PAGE_GENERIC
+  device.usUsage = 0x06;      // HID_USAGE_GENERIC_KEYBOARD
+  device.dwFlags = 0;
+  device.hwndTarget = 0;
+  RegisterRawInputDevices(&device, 1, sizeof(RAWINPUTDEVICE));
 
   ShowWindow(hwnd_, SW_SHOWNORMAL);
   UpdateWindow(hwnd_);
@@ -277,6 +289,15 @@ void Win32Window::ToggleFullscreen(bool fullscreen) {
       AdjustWindowRect(&rc, GetWindowLong(hwnd_, GWL_STYLE), false);
       MoveWindow(hwnd_, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
                  TRUE);
+
+      // Reduce cursor bounds by 1px on each side, just in case..
+      rc.top++;
+      rc.left++;
+      rc.bottom--;
+      rc.right--;
+
+      // Keep cursor inside the fullscreen window
+      ClipCursor(&rc);
     }
   } else {
     // Reinstate borders, resize to 1280x720
@@ -287,6 +308,9 @@ void Win32Window::ToggleFullscreen(bool fullscreen) {
     if (main_menu) {
       ::SetMenu(hwnd_, main_menu->handle());
     }
+
+    // Unbound the mouse cursor
+    ClipCursor(NULL);
   }
 
   fullscreen_ = fullscreen;
@@ -506,6 +530,149 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
   }
 
   switch (message) {
+    case WM_INPUT: {
+      HRAWINPUT hRawInput = (HRAWINPUT)lParam;
+      UINT dataSize = 0;
+
+      // Get size of the rawinput data
+      if (GetRawInputData(hRawInput, RID_INPUT, NULL, &dataSize,
+                          sizeof(RAWINPUTHEADER)) != 0 ||
+          dataSize == 0 || dataSize > sizeof(RAWINPUT)) {
+        // Unknown failure, exit out
+        assert_always();
+        break;
+      }
+
+      // Now get the actual data itself
+      if (GetRawInputData(hRawInput, RID_INPUT, &rawinput_data_, &dataSize,
+                          sizeof(RAWINPUTHEADER)) == (UINT)-1) {
+        // Another unknown failure
+        assert_always();
+        break;
+      }
+
+      if (rawinput_data_.header.dwType == RIM_TYPEMOUSE) {
+        const auto& mouseData = rawinput_data_.data.mouse;
+
+        auto e = MouseEvent(this, MouseEvent::Button::kNone, mouseData.lLastX,
+                            mouseData.lLastY, mouseData.usButtonFlags,
+                            (int16_t)mouseData.usButtonData);
+        OnRawMouse(&e);
+        return 0;
+      } else if (rawinput_data_.header.dwType == RIM_TYPEKEYBOARD) {
+        const auto& keyData = rawinput_data_.data.keyboard;
+
+        // Adjust VK code passed to handlers
+        // Based on
+        // https://blog.molecular-matters.com/2011/09/05/properly-handling-keyboard-input/
+        auto vkey = keyData.VKey;
+        bool isE0 = (keyData.Flags & RI_KEY_E0) != 0;
+
+        // discard "fake keys" which are part of an escaped sequence
+        if (vkey == 255) {
+          return 0;
+        } else if (vkey == VK_SHIFT) {
+          // correct left-hand / right-hand SHIFT
+          vkey = MapVirtualKey(keyData.MakeCode, MAPVK_VSC_TO_VK_EX);
+        } else {
+          switch (vkey) {
+            // right-hand CONTROL and ALT have their e0 bit set
+            case VK_CONTROL:
+              vkey = isE0 ? VK_RCONTROL : VK_LCONTROL;
+              break;
+
+            case VK_MENU:
+              vkey = isE0 ? VK_RMENU : VK_LMENU;
+              break;
+
+            case VK_RETURN:
+              if (isE0) {
+                vkey = VK_SEPARATOR;
+              }
+              break;
+
+            // the standard INSERT, DELETE, HOME, END, PRIOR and NEXT keys will
+            // always have their e0 bit set, but the corresponding keys on the
+            // NUMPAD will not.
+            case VK_INSERT:
+              if (!isE0) {
+                vkey = VK_NUMPAD0;
+              }
+              break;
+
+            case VK_DELETE:
+              if (!isE0) {
+                vkey = VK_DECIMAL;
+              }
+              break;
+
+            case VK_HOME:
+              if (!isE0) {
+                vkey = VK_NUMPAD7;
+              }
+              break;
+
+            case VK_END:
+              if (!isE0) {
+                vkey = VK_NUMPAD1;
+              }
+              break;
+
+            case VK_PRIOR:
+              if (!isE0) {
+                vkey = VK_NUMPAD9;
+              }
+              break;
+
+            case VK_NEXT:
+              if (!isE0) {
+                vkey = VK_NUMPAD3;
+              }
+              break;
+
+            // the standard arrow keys will always have their e0 bit set, but
+            // the corresponding keys on the NUMPAD will not.
+            case VK_LEFT:
+              if (!isE0) {
+                vkey = VK_NUMPAD4;
+              }
+              break;
+
+            case VK_RIGHT:
+              if (!isE0) {
+                vkey = VK_NUMPAD6;
+              }
+              break;
+
+            case VK_UP:
+              if (!isE0) {
+                vkey = VK_NUMPAD8;
+              }
+              break;
+
+            case VK_DOWN:
+              if (!isE0) {
+                vkey = VK_NUMPAD2;
+              }
+              break;
+
+            // NUMPAD 5 doesn't have its e0 bit set
+            case VK_CLEAR:
+              if (!isE0) {
+                vkey = VK_NUMPAD5;
+              }
+              break;
+          }
+        }
+
+        auto e = KeyEvent(this, vkey, 0, !(keyData.Flags & RI_KEY_BREAK), false,
+                          false, false, false);
+
+        OnRawKeyboard(&e);
+        return 0;
+      }
+
+    } break;
     case WM_DROPFILES: {
       HDROP drop_handle = reinterpret_cast<HDROP>(wParam);
       auto drop_count = DragQueryFileW(drop_handle, 0xFFFFFFFFu, nullptr, 0);
@@ -603,6 +770,20 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
       has_focus_ = true;
       auto e = UIEvent(this);
       OnGotFocus(&e);
+
+      if (is_fullscreen()) {
+        // Cursor bounds can be lost when focus is lost, reapply them...
+        // TODO: can this go somewhere better?
+        RECT bounds;
+        GetWindowRect(hwnd(), &bounds);
+        // Reduce cursor bounds by 1px on each side, just in case..
+        bounds.top++;
+        bounds.left++;
+        bounds.bottom--;
+        bounds.right--;
+        ClipCursor(&bounds);
+      }
+
       break;
     }
 
@@ -717,7 +898,7 @@ bool Win32Window::HandleMouse(UINT message, WPARAM wParam, LPARAM lParam) {
 
 bool Win32Window::HandleKeyboard(UINT message, WPARAM wParam, LPARAM lParam) {
   auto e = KeyEvent(
-      this, VirtualKey(wParam), lParam & 0xFFFF0000, !!(lParam & 0x2),
+      this, static_cast<int>(wParam), lParam & 0xFFFF0000, !!(lParam & 0x2),
       !!(GetKeyState(VK_SHIFT) & 0x80), !!(GetKeyState(VK_CONTROL) & 0x80),
       !!(GetKeyState(VK_MENU) & 0x80), !!(GetKeyState(VK_LWIN) & 0x80));
   switch (message) {

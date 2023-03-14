@@ -13,7 +13,6 @@
 #include <memory>
 
 #include "xenia/base/string.h"
-#include "xenia/ui/virtual_key.h"
 
 #if XE_PLATFORM_WIN32
 #define XE_OPTION_PROFILING 1
@@ -172,8 +171,8 @@ class Profiler {
   // Deactivates the calling thread for profiling.
   static void ThreadExit();
 
-  static bool OnKeyDown(ui::VirtualKey virtual_key);
-  static bool OnKeyUp(ui::VirtualKey virtual_key);
+  static bool OnKeyDown(int key_code);
+  static bool OnKeyUp(int key_code);
   static void OnMouseDown(bool left_button, bool right_button);
   static void OnMouseUp();
   static void OnMouseMove(int x, int y);

@@ -259,20 +259,19 @@ void Window::OnLostFocus(UIEvent* e) {
 
 void Window::OnKeyPress(KeyEvent* e, bool is_down, bool is_char) {
   if (!is_char) {
-    switch (e->virtual_key()) {
-      case VirtualKey::kShift:
+    switch (e->key_code()) {
+      case 16:
         modifier_shift_pressed_ = is_down;
         break;
-      case VirtualKey::kControl:
+      case 17:
         modifier_cntrl_pressed_ = is_down;
         break;
-      case VirtualKey::kMenu:
-        modifier_alt_pressed_ = is_down;
-        break;
-      case VirtualKey::kLWin:
+      // case xx:
+      //  // alt ??
+      //  modifier_alt_pressed_ = is_down;
+      //  break;
+      case 91:
         modifier_super_pressed_ = is_down;
-        break;
-      default:
         break;
     }
   }
@@ -349,6 +348,28 @@ void Window::OnMouseWheel(MouseEvent* e) {
   }
   TryForEachListener([e](auto listener) {
     listener->OnMouseWheel(e);
+    return e->is_handled();
+  });
+}
+
+void Window::OnRawMouse(MouseEvent* e) {
+  on_raw_mouse(e);
+  if (e->is_handled()) {
+    return;
+  }
+  TryForEachListener([e](auto listener) {
+    listener->OnRawMouse(e);
+    return e->is_handled();
+  });
+}
+
+void Window::OnRawKeyboard(KeyEvent* e) {
+  on_raw_keyboard(e);
+  if (e->is_handled()) {
+    return;
+  }
+  TryForEachListener([e](auto listener) {
+    listener->OnRawKeyboard(e);
     return e->is_handled();
   });
 }

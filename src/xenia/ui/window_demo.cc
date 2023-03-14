@@ -17,7 +17,6 @@
 #include "xenia/ui/graphics_provider.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
-#include "xenia/ui/virtual_key.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_demo.h"
 
@@ -84,12 +83,10 @@ bool WindowDemoApp::OnInitialize() {
   });
 
   window_->on_key_down.AddListener([](xe::ui::KeyEvent* e) {
-    switch (e->virtual_key()) {
-      case VirtualKey::kF3:
+    switch (e->key_code()) {
+      case 0x72: {  // F3
         Profiler::ToggleDisplay();
-        break;
-      default:
-        break;
+      } break;
     }
   });
 

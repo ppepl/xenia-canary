@@ -141,6 +141,9 @@ class Window {
   Delegate<MouseEvent*> on_mouse_up;
   Delegate<MouseEvent*> on_mouse_wheel;
 
+  Delegate<MouseEvent*> on_raw_mouse;
+  Delegate<KeyEvent*> on_raw_keyboard;
+
  protected:
   Window(WindowedAppContext& app_context, const std::string& title);
 
@@ -174,6 +177,9 @@ class Window {
   virtual void OnMouseMove(MouseEvent* e);
   virtual void OnMouseUp(MouseEvent* e);
   virtual void OnMouseWheel(MouseEvent* e);
+
+  virtual void OnRawMouse(MouseEvent* e);
+  virtual void OnRawKeyboard(KeyEvent* e);
 
   void OnKeyPress(KeyEvent* e, bool is_down, bool is_char);
 

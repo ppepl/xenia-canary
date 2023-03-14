@@ -30,7 +30,6 @@
 #include "xenia/memory.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/imgui_drawer.h"
-#include "xenia/ui/virtual_key.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
 #include "xenia/xbox.h"
@@ -128,7 +127,7 @@ bool TraceViewer::Setup() {
   window_->set_imgui_input_enabled(true);
 
   window_->on_key_char.AddListener([&](xe::ui::KeyEvent* e) {
-    if (e->virtual_key() == xe::ui::VirtualKey::kF5) {
+    if (e->key_code() == 0x74 /* VK_F5 */) {
       graphics_system_->ClearCaches();
       e->set_handled(true);
     }
