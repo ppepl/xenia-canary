@@ -81,7 +81,7 @@ struct XMA_CONTEXT_DATA {
   // DWORD 3
   uint32_t loop_start : 26;  // XMASetLoopData LoopStartOffset
                              // frame offset in bits
-  uint32_t unk_dword_3 : 6;  // ? ParserErrorStatus/ParserErrorSet(?)
+  uint32_t parser_error_status : 6;  // ? ParserErrorStatus/ParserErrorSet(?)
 
   // DWORD 4
   uint32_t loop_end : 26;        // XMASetLoopData LoopEndOffset
@@ -196,13 +196,17 @@ class XmaContext {
   void Decode(XMA_CONTEXT_DATA* data);
   int PrepareDecoder(uint8_t* packet, int sample_rate, bool is_two_channel);
 
+  // This method should be used ONLY when we're at the last packet of the stream
+  // and we want to find offset in next buffer
+  uint32_t GetPacketFirstFrameOffset(const XMA_CONTEXT_DATA* data);
+
   Memory* memory_ = nullptr;
 
   uint32_t id_ = 0;
   uint32_t guest_ptr_ = 0;
-  std::mutex lock_;
-  bool is_allocated_ = false;
-  bool is_enabled_ = false;
+  xe_mutex lock_;
+  volatile bool is_allocated_ = false;
+  volatile bool is_enabled_ = false;
   // bool is_dirty_ = true;
 
   // ffmpeg structures
@@ -221,6 +225,7 @@ class XmaContext {
   // std::vector<uint8_t> partial_frame_buffer_;
   uint32_t packets_skip_ = 0;
 
+  bool is_stream_done_ = false;
   // bool split_frame_pending_ = false;
   uint32_t split_frame_len_ = 0;
   uint32_t split_frame_len_partial_ = 0;

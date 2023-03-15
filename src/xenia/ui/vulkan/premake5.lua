@@ -7,40 +7,38 @@ project("xenia-ui-vulkan")
   kind("StaticLib")
   language("C++")
   links({
-    "fmt",
     "xenia-base",
     "xenia-ui",
-    "xenia-ui-spirv",
   })
-  defines({
-  })
+  filter({"configurations:Release", "platforms:Windows"})
+    buildoptions({
+      "/Os",
+      "/O1"
+    })
+  filter {}
   includedirs({
-    project_root.."/third_party/vulkan/",
+    project_root.."/third_party/Vulkan-Headers/include",
   })
   local_platform_files()
   local_platform_files("functions")
   files({
-    "shaders/bin/*.h",
+    "../shaders/bytecode/vulkan_spirv/*.h",
   })
-  removefiles({"*_demo.cc"})
 
 group("demos")
 project("xenia-ui-window-vulkan-demo")
   uuid("97598f13-3177-454c-8e58-c59e2b6ede27")
-  kind("WindowedApp")
+  single_library_windowed_app_kind()
   language("C++")
   links({
     "fmt",
     "imgui",
     "xenia-base",
     "xenia-ui",
-    "xenia-ui-spirv",
     "xenia-ui-vulkan",
   })
-  defines({
-  })
   includedirs({
-    project_root.."/third_party/vulkan/",
+    project_root.."/third_party/Vulkan-Headers/include",
   })
   files({
     "../window_demo.cc",

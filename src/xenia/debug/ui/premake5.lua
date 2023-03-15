@@ -12,6 +12,12 @@ project("xenia-debug-ui")
     "xenia-cpu",
     "xenia-ui",
   })
+  filter({"configurations:Release", "platforms:Windows"})
+    buildoptions({
+      "/Os",
+      "/O1"
+    })
+  filter{}
   defines({
   })
   includedirs({

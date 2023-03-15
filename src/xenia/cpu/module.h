@@ -46,6 +46,7 @@ class Module {
   Symbol::Status DefineFunction(Function* symbol);
   Symbol::Status DefineVariable(Symbol* symbol);
 
+  const std::vector<uint32_t> GetAddressedFunctions();
   void ForEachFunction(std::function<void(Function*)> callback);
   void ForEachSymbol(size_t start_index, size_t end_index,
                      std::function<void(Symbol*)> callback);
@@ -53,6 +54,7 @@ class Module {
 
   bool ReadMap(const char* file_name);
 
+  virtual void Precompile() {}
  protected:
   virtual std::unique_ptr<Function> CreateFunction(uint32_t address) = 0;
 

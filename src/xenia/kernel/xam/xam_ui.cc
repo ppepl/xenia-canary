@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -16,6 +16,7 @@
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/ui/imgui_dialog.h"
+#include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
 #include "xenia/xbox.h"
@@ -51,8 +52,10 @@ class XamDialog : public xe::ui::ImGuiDialog {
   }
 
  protected:
-  XamDialog(xe::ui::Window* window) : xe::ui::ImGuiDialog(window) {}
+  XamDialog(xe::ui::ImGuiDrawer* imgui_drawer)
+      : xe::ui::ImGuiDialog(imgui_drawer) {}
 
+  virtual ~XamDialog() {}
   void OnClose() override {
     if (close_callback_) {
       close_callback_();
@@ -201,15 +204,15 @@ X_RESULT xeXamDispatchHeadlessEx(
   }
 }
 
-dword_result_t XamIsUIActive() { return xeXamIsUIActive(); }
+dword_result_t XamIsUIActive_entry() { return xeXamIsUIActive(); }
 DECLARE_XAM_EXPORT2(XamIsUIActive, kUI, kImplemented, kHighFrequency);
 
 class MessageBoxDialog : public XamDialog {
  public:
-  MessageBoxDialog(xe::ui::Window* window, std::string title,
+  MessageBoxDialog(xe::ui::ImGuiDrawer* imgui_drawer, std::string title,
                    std::string description, std::vector<std::string> buttons,
                    uint32_t default_button)
-      : XamDialog(window),
+      : XamDialog(imgui_drawer),
         title_(title),
         description_(description),
         buttons_(std::move(buttons)),
@@ -252,6 +255,7 @@ class MessageBoxDialog : public XamDialog {
       Close();
     }
   }
+  virtual ~MessageBoxDialog() {}
 
  private:
   bool has_opened_ = false;
@@ -262,12 +266,10 @@ class MessageBoxDialog : public XamDialog {
   uint32_t chosen_button_ = 0;
 };
 
-// https://www.se7ensins.com/forums/threads/working-xshowmessageboxui.844116/
-dword_result_t XamShowMessageBoxUI(dword_t user_index, lpu16string_t title_ptr,
-                                   lpu16string_t text_ptr, dword_t button_count,
-                                   lpdword_t button_ptrs, dword_t active_button,
-                                   dword_t flags, lpdword_t result_ptr,
-                                   pointer_t<XAM_OVERLAPPED> overlapped) {
+static dword_result_t XamShowMessageBoxUi(
+    dword_t user_index, lpu16string_t title_ptr, lpu16string_t text_ptr,
+    dword_t button_count, lpdword_t button_ptrs, dword_t active_button,
+    dword_t flags, lpdword_t result_ptr, pointer_t<XAM_OVERLAPPED> overlapped) {
   std::string title;
   if (title_ptr) {
     title = xe::to_utf8(title_ptr.value());
@@ -284,7 +286,7 @@ dword_result_t XamShowMessageBoxUI(dword_t user_index, lpu16string_t title_ptr,
   }
 
   auto title_id = kernel_state()->title_id();
-
+  
   X_RESULT result;
   if (cvars::headless || title_id == 0x584109C2) {
     uint32_t active_btn = active_button;
@@ -317,23 +319,43 @@ dword_result_t XamShowMessageBoxUI(dword_t user_index, lpu16string_t title_ptr,
       *result_ptr = dialog->chosen_button();
       return X_ERROR_SUCCESS;
     };
-    auto display_window = kernel_state()->emulator()->display_window();
+    const Emulator* emulator = kernel_state()->emulator();
+    ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
     result = xeXamDispatchDialog<MessageBoxDialog>(
-        new MessageBoxDialog(display_window, title,
-                             xe::to_utf8(text_ptr.value()), buttons,
-                             active_button),
+        new MessageBoxDialog(imgui_drawer, title, xe::to_utf8(text_ptr.value()),
+                             buttons, active_button),
         close, overlapped);
   }
   return result;
 }
+
+// https://www.se7ensins.com/forums/threads/working-xshowmessageboxui.844116/
+dword_result_t XamShowMessageBoxUI_entry(
+    dword_t user_index, lpu16string_t title_ptr, lpu16string_t text_ptr,
+    dword_t button_count, lpdword_t button_ptrs, dword_t active_button,
+    dword_t flags, lpdword_t result_ptr, pointer_t<XAM_OVERLAPPED> overlapped) {
+  return XamShowMessageBoxUi(user_index, title_ptr, text_ptr, button_count,
+                             button_ptrs, active_button, flags, result_ptr,
+                             overlapped);
+}
 DECLARE_XAM_EXPORT1(XamShowMessageBoxUI, kUI, kImplemented);
 
+dword_result_t XamShowMessageBoxUIEx_entry(
+    dword_t user_index, lpu16string_t title_ptr, lpu16string_t text_ptr,
+    dword_t button_count, lpdword_t button_ptrs, dword_t active_button,
+    dword_t flags, dword_t unknown_unused, lpdword_t result_ptr,
+    pointer_t<XAM_OVERLAPPED> overlapped) {
+  return XamShowMessageBoxUi(user_index, title_ptr, text_ptr, button_count,
+                             button_ptrs, active_button, flags, result_ptr,
+                             overlapped);
+}
+DECLARE_XAM_EXPORT1(XamShowMessageBoxUIEx, kUI, kImplemented);
 class KeyboardInputDialog : public XamDialog {
  public:
-  KeyboardInputDialog(xe::ui::Window* window, std::string title,
+  KeyboardInputDialog(xe::ui::ImGuiDrawer* imgui_drawer, std::string title,
                       std::string description, std::string default_text,
                       size_t max_length)
-      : XamDialog(window),
+      : XamDialog(imgui_drawer),
         title_(title),
         description_(description),
         default_text_(default_text),
@@ -352,6 +374,7 @@ class KeyboardInputDialog : public XamDialog {
     xe::string_util::copy_truncating(text_buffer_.data(), default_text_,
                                      text_buffer_.size());
   }
+  virtual ~KeyboardInputDialog() {}
 
   const std::string& text() const { return text_; }
   bool cancelled() const { return cancelled_; }
@@ -410,11 +433,10 @@ class KeyboardInputDialog : public XamDialog {
 };
 
 // https://www.se7ensins.com/forums/threads/release-how-to-use-xshowkeyboardui-release.906568/
-dword_result_t XamShowKeyboardUI(dword_t user_index, dword_t flags,
-                                 lpu16string_t default_text,
-                                 lpu16string_t title, lpu16string_t description,
-                                 lpu16string_t buffer, dword_t buffer_length,
-                                 pointer_t<XAM_OVERLAPPED> overlapped) {
+dword_result_t XamShowKeyboardUI_entry(
+    dword_t user_index, dword_t flags, lpu16string_t default_text,
+    lpu16string_t title, lpu16string_t description, lpu16string_t buffer,
+    dword_t buffer_length, pointer_t<XAM_OVERLAPPED> overlapped) {
   if (!buffer) {
     return X_ERROR_INVALID_PARAMETER;
   }
@@ -454,10 +476,11 @@ dword_result_t XamShowKeyboardUI(dword_t user_index, dword_t flags,
         return X_ERROR_SUCCESS;
       }
     };
-    auto display_window = kernel_state()->emulator()->display_window();
+    const Emulator* emulator = kernel_state()->emulator();
+    ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
     result = xeXamDispatchDialogEx<KeyboardInputDialog>(
         new KeyboardInputDialog(
-            display_window, title ? xe::to_utf8(title.value()) : "",
+            imgui_drawer, title ? xe::to_utf8(title.value()) : "",
             description ? xe::to_utf8(description.value()) : "",
             default_text ? xe::to_utf8(default_text.value()) : "",
             buffer_length),
@@ -467,11 +490,10 @@ dword_result_t XamShowKeyboardUI(dword_t user_index, dword_t flags,
 }
 DECLARE_XAM_EXPORT1(XamShowKeyboardUI, kUI, kImplemented);
 
-dword_result_t XamShowDeviceSelectorUI(dword_t user_index, dword_t content_type,
-                                       dword_t content_flags,
-                                       qword_t total_requested,
-                                       lpdword_t device_id_ptr,
-                                       pointer_t<XAM_OVERLAPPED> overlapped) {
+dword_result_t XamShowDeviceSelectorUI_entry(
+    dword_t user_index, dword_t content_type, dword_t content_flags,
+    qword_t total_requested, lpdword_t device_id_ptr,
+    pointer_t<XAM_OVERLAPPED> overlapped) {
   return xeXamDispatchHeadless(
       [device_id_ptr]() -> X_RESULT {
         // NOTE: 0x00000001 is our dummy device ID from xam_content.cc
@@ -482,16 +504,17 @@ dword_result_t XamShowDeviceSelectorUI(dword_t user_index, dword_t content_type,
 }
 DECLARE_XAM_EXPORT1(XamShowDeviceSelectorUI, kUI, kImplemented);
 
-void XamShowDirtyDiscErrorUI(dword_t user_index) {
+void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
   if (cvars::headless) {
     assert_always();
     exit(1);
     return;
   }
-  auto display_window = kernel_state()->emulator()->display_window();
+  const Emulator* emulator = kernel_state()->emulator();
+  ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
   xeXamDispatchDialog<MessageBoxDialog>(
       new MessageBoxDialog(
-          display_window, "Disc Read Error",
+          imgui_drawer, "Disc Read Error",
           "There's been an issue reading content from the game disc.\nThis is "
           "likely caused by bad or unimplemented file IO calls.",
           {"OK"}, 0),
@@ -502,19 +525,18 @@ void XamShowDirtyDiscErrorUI(dword_t user_index) {
 }
 DECLARE_XAM_EXPORT1(XamShowDirtyDiscErrorUI, kUI, kImplemented);
 
-dword_result_t XamShowPartyUI(unknown_t r3, unknown_t r4) {
+dword_result_t XamShowPartyUI_entry(unknown_t r3, unknown_t r4) {
   return X_ERROR_FUNCTION_FAILED;
 }
 DECLARE_XAM_EXPORT1(XamShowPartyUI, kNone, kStub);
 
-dword_result_t XamShowCommunitySessionsUI(unknown_t r3, unknown_t r4) {
+dword_result_t XamShowCommunitySessionsUI_entry(unknown_t r3, unknown_t r4) {
   return X_ERROR_FUNCTION_FAILED;
 }
 DECLARE_XAM_EXPORT1(XamShowCommunitySessionsUI, kNone, kStub);
 
-void RegisterUIExports(xe::cpu::ExportResolver* export_resolver,
-                       KernelState* kernel_state) {}
-
 }  // namespace xam
 }  // namespace kernel
 }  // namespace xe
+
+DECLARE_XAM_EMPTY_REGISTER_EXPORTS(UI);

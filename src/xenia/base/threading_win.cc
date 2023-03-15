@@ -2,23 +2,70 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
+#include <winternl.h>
 #include "xenia/base/assert.h"
+#include "xenia/base/chrono_steady_cast.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform_win.h"
 #include "xenia/base/threading.h"
-
+#include "xenia/base/threading_timer_queue.h"
+#if defined(__clang__)
+// chrispy: i do not understand why this is an error for clang here
+// something about the quoted __FUNCTION__ freaks it out (clang 14.0.1)
+#define LOG_LASTERROR()                                                       \
+  do {                                                                        \
+    XELOGI("Win32 Error 0x{:08X} in {} (...)", GetLastError(), __FUNCTION__); \
+  } while (false)
+#else
+#define LOG_LASTERROR()                                                      \
+  do {                                                                       \
+    XELOGI("Win32 Error 0x{:08X} in " __FUNCTION__ "(...)", GetLastError()); \
+  } while (false)
+#endif
 typedef HANDLE (*SetThreadDescriptionFn)(HANDLE hThread,
                                          PCWSTR lpThreadDescription);
 
+// sys function for ntyieldexecution, by calling it we sidestep
+// RtlGetCurrentUmsThread
+XE_NTDLL_IMPORT(NtYieldExecution, cls_NtYieldExecution,
+                NtYieldExecutionPointer);
+// sidestep the activation context/remapping special windows handles like stdout
+XE_NTDLL_IMPORT(NtWaitForSingleObject, cls_NtWaitForSingleObject,
+                NtWaitForSingleObjectPointer);
+
+XE_NTDLL_IMPORT(NtSetEvent, cls_NtSetEvent, NtSetEventPointer);
+XE_NTDLL_IMPORT(NtSetEventBoostPriority, cls_NtSetEventBoostPriority,
+                NtSetEventBoostPriorityPointer);
+// difference between NtClearEvent and NtResetEvent is that NtResetEvent returns
+// the events state prior to the call, but we dont need that. might need to
+// check whether one or the other is faster in the kernel though yeah, just
+// checked, the code in ntoskrnl is way simpler for clearevent than resetevent
+XE_NTDLL_IMPORT(NtClearEvent, cls_NtClearEvent, NtClearEventPointer);
+XE_NTDLL_IMPORT(NtPulseEvent, cls_NtPulseEvent, NtPulseEventPointer);
+
+// heavily called, we dont skip much garbage by calling this, but every bit
+// counts
+XE_NTDLL_IMPORT(NtReleaseSemaphore, cls_NtReleaseSemaphore,
+                NtReleaseSemaphorePointer);
+
+XE_NTDLL_IMPORT(NtDelayExecution, cls_NtDelayExecution,
+                NtDelayExecutionPointer);
+XE_NTDLL_IMPORT(NtQueryEvent, cls_NtQueryEvent, NtQueryEventPointer);
 namespace xe {
 namespace threading {
 
 void EnableAffinityConfiguration() {
+  // chrispy: i don't think this is necessary,
+  // affinity always seems to be the system mask? research more
+  // also, maybe if ignore_thread_affinities is on we should use
+  // SetProcessAffinityUpdateMode to allow windows to dynamically update
+  // our process' affinity (by default windows cannot change the affinity itself
+  // at runtime, user code must do it)
   HANDLE process_handle = GetCurrentProcess();
   DWORD_PTR process_affinity_mask;
   DWORD_PTR system_affinity_mask;
@@ -63,7 +110,8 @@ static void set_name(HANDLE thread, const std::string_view name) {
     auto func =
         (SetThreadDescriptionFn)GetProcAddress(kernel, "SetThreadDescription");
     if (func) {
-      func(thread, reinterpret_cast<PCWSTR>(xe::to_utf16(name).c_str()));
+      auto u16name = xe::to_utf16(name);
+      func(thread, reinterpret_cast<PCWSTR>(u16name.c_str()));
     }
   }
   raise_thread_name_exception(thread, std::string(name));
@@ -73,9 +121,32 @@ void set_name(const std::string_view name) {
   set_name(GetCurrentThread(), name);
 }
 
+// checked ntoskrnl, it does not modify delay, so we can place this as a
+// constant and avoid creating a stack variable
+static const LARGE_INTEGER sleepdelay0_for_maybeyield{{0LL}};
+
 void MaybeYield() {
+#if 0
+#if defined(XE_USE_NTDLL_FUNCTIONS)
+	
+  NtYieldExecutionPointer.invoke();
+#else
   SwitchToThread();
-  MemoryBarrier();
+#endif
+#else
+  // chrispy: SwitchToThread will only switch to a ready thread on the current
+  // processor, so if one is not ready we end up spinning, constantly calling
+  // switchtothread without doing any work, heating up the users cpu sleep(0)
+  // however will yield to threads on other processors and surrenders the
+  // current timeslice
+#if defined(XE_USE_NTDLL_FUNCTIONS)
+  NtDelayExecutionPointer.invoke(0, &sleepdelay0_for_maybeyield);
+#else
+  ::Sleep(0);
+#endif
+#endif
+  // memorybarrier is really not necessary here...
+  // MemoryBarrier();
 }
 
 void SyncMemory() { MemoryBarrier(); }
@@ -108,52 +179,12 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
   return TlsSetValue(handle, reinterpret_cast<void*>(value)) ? true : false;
 }
 
-class Win32HighResolutionTimer : public HighResolutionTimer {
- public:
-  Win32HighResolutionTimer(std::function<void()> callback)
-      : callback_(std::move(callback)) {}
-  ~Win32HighResolutionTimer() override {
-    if (valid_) {
-      DeleteTimerQueueTimer(nullptr, handle_, INVALID_HANDLE_VALUE);
-      handle_ = nullptr;
-    }
-  }
-
-  bool Initialize(std::chrono::milliseconds period) {
-    if (valid_) {
-      // Double initialization
-      assert_always();
-      return false;
-    }
-    valid_ = !!CreateTimerQueueTimer(
-        &handle_, nullptr,
-        [](PVOID param, BOOLEAN timer_or_wait_fired) {
-          auto timer = reinterpret_cast<Win32HighResolutionTimer*>(param);
-          timer->callback_();
-        },
-        this, 0, DWORD(period.count()), WT_EXECUTEINTIMERTHREAD);
-    return valid_;
-  }
-
- private:
-  std::function<void()> callback_;
-  HANDLE handle_ = nullptr;
-  bool valid_ = false;  // Documentation does not state which HANDLE is invalid
-};
-
-std::unique_ptr<HighResolutionTimer> HighResolutionTimer::CreateRepeating(
-    std::chrono::milliseconds period, std::function<void()> callback) {
-  auto timer = std::make_unique<Win32HighResolutionTimer>(std::move(callback));
-  if (!timer->Initialize(period)) {
-    return nullptr;
-  }
-  return std::move(timer);
-}
-
 template <typename T>
 class Win32Handle : public T {
  public:
-  explicit Win32Handle(HANDLE handle) : handle_(handle) {}
+  explicit Win32Handle(HANDLE handle) : handle_(handle) {
+    assert_not_null(handle);
+  }
   ~Win32Handle() override {
     CloseHandle(handle_);
     handle_ = nullptr;
@@ -168,8 +199,26 @@ class Win32Handle : public T {
 WaitResult Wait(WaitHandle* wait_handle, bool is_alertable,
                 std::chrono::milliseconds timeout) {
   HANDLE handle = wait_handle->native_handle();
-  DWORD result = WaitForSingleObjectEx(handle, DWORD(timeout.count()),
-                                       is_alertable ? TRUE : FALSE);
+  DWORD result;
+  DWORD timeout_dw = DWORD(timeout.count());
+  BOOL bAlertable = is_alertable ? TRUE : FALSE;
+  // todo: we might actually be able to use NtWaitForSingleObject even if its
+  // alertable, just need to study whether
+  // RtlDeactivateActivationContextUnsafeFast/RtlActivateActivationContext are
+  // actually needed for us
+#if XE_USE_NTDLL_FUNCTIONS == 1
+  if (bAlertable) {
+    result = WaitForSingleObjectEx(handle, timeout_dw, bAlertable);
+  } else {
+    LARGE_INTEGER timeout_big;
+    timeout_big.QuadPart = -10000LL * static_cast<int64_t>(timeout_dw);
+
+    result = NtWaitForSingleObjectPointer.invoke<NTSTATUS>(
+        handle, bAlertable, timeout_dw == INFINITE ? nullptr : &timeout_big);
+  }
+#else
+  result = WaitForSingleObjectEx(handle, timeout_dw, bAlertable);
+#endif
   switch (result) {
     case WAIT_OBJECT_0:
       return WaitResult::kSuccess;
@@ -212,18 +261,20 @@ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[],
                                            size_t wait_handle_count,
                                            bool wait_all, bool is_alertable,
                                            std::chrono::milliseconds timeout) {
-  std::vector<HANDLE> handles(wait_handle_count);
+  xenia_assert(wait_handle_count <= 64);
+  HANDLE handles[64];
+
   for (size_t i = 0; i < wait_handle_count; ++i) {
     handles[i] = wait_handles[i]->native_handle();
   }
   DWORD result = WaitForMultipleObjectsEx(
-      DWORD(handles.size()), handles.data(), wait_all ? TRUE : FALSE,
+      static_cast<DWORD>(wait_handle_count), handles, wait_all ? TRUE : FALSE,
       DWORD(timeout.count()), is_alertable ? TRUE : FALSE);
-  if (result >= WAIT_OBJECT_0 && result < WAIT_OBJECT_0 + handles.size()) {
+  if (result >= WAIT_OBJECT_0 && result < WAIT_OBJECT_0 + wait_handle_count) {
     return std::pair<WaitResult, size_t>(WaitResult::kSuccess,
                                          result - WAIT_OBJECT_0);
   } else if (result >= WAIT_ABANDONED_0 &&
-             result < WAIT_ABANDONED_0 + handles.size()) {
+             result < WAIT_ABANDONED_0 + wait_handle_count) {
     return std::pair<WaitResult, size_t>(WaitResult::kAbandoned,
                                          result - WAIT_ABANDONED_0);
   }
@@ -242,19 +293,61 @@ class Win32Event : public Win32Handle<Event> {
  public:
   explicit Win32Event(HANDLE handle) : Win32Handle(handle) {}
   ~Win32Event() override = default;
+#if XE_USE_NTDLL_FUNCTIONS == 1
+  void Set() override { NtSetEventPointer.invoke(handle_, nullptr); }
+  void Reset() override { NtClearEventPointer.invoke(handle_); }
+  void Pulse() override { NtPulseEventPointer.invoke(handle_, nullptr); }
+  void SetBoostPriority() override {
+    // no previous state for boostpriority
+    // Boost priority is unimplemented under wine probably because it's not used
+    // anywhere in user mode except by us. Maybe some Windows internals uses it
+    // see:
+    // https://discord.com/channels/308194948048486401/308207592482668545/1027178776599216228
+    if (NtSetEventBoostPriorityPointer) {
+      NtSetEventBoostPriorityPointer.invoke(handle_);
+    } else {
+      NtSetEventPointer.invoke(handle_, nullptr);
+    }
+  }
+#else
   void Set() override { SetEvent(handle_); }
   void Reset() override { ResetEvent(handle_); }
   void Pulse() override { PulseEvent(handle_); }
+
+  void SetBoostPriority() override {
+    // no win32 version of boostpriority
+    SetEvent(handle_);
+  }
+#endif
+
+  EventInfo Query() override {
+    EventInfo result{};
+    NtQueryEventPointer.invoke(handle_, 0, &result, sizeof(EventInfo), nullptr);
+    return result;
+  }
 };
 
 std::unique_ptr<Event> Event::CreateManualResetEvent(bool initial_state) {
-  return std::make_unique<Win32Event>(
-      CreateEvent(nullptr, TRUE, initial_state ? TRUE : FALSE, nullptr));
+  HANDLE handle =
+      CreateEvent(nullptr, TRUE, initial_state ? TRUE : FALSE, nullptr);
+  if (handle) {
+    return std::make_unique<Win32Event>(handle);
+  } else {
+    LOG_LASTERROR();
+
+    return nullptr;
+  }
 }
 
 std::unique_ptr<Event> Event::CreateAutoResetEvent(bool initial_state) {
-  return std::make_unique<Win32Event>(
-      CreateEvent(nullptr, FALSE, initial_state ? TRUE : FALSE, nullptr));
+  HANDLE handle =
+      CreateEvent(nullptr, FALSE, initial_state ? TRUE : FALSE, nullptr);
+  if (handle) {
+    return std::make_unique<Win32Event>(handle);
+  } else {
+    LOG_LASTERROR();
+    return nullptr;
+  }
 }
 
 class Win32Semaphore : public Win32Handle<Semaphore> {
@@ -262,17 +355,28 @@ class Win32Semaphore : public Win32Handle<Semaphore> {
   explicit Win32Semaphore(HANDLE handle) : Win32Handle(handle) {}
   ~Win32Semaphore() override = default;
   bool Release(int release_count, int* out_previous_count) override {
+#if XE_USE_NTDLL_FUNCTIONS == 1
+    return NtReleaseSemaphorePointer.invoke<NTSTATUS>(handle_, release_count,
+                                                      out_previous_count) >= 0;
+#else
     return ReleaseSemaphore(handle_, release_count,
                             reinterpret_cast<LPLONG>(out_previous_count))
                ? true
                : false;
+#endif
   }
 };
 
 std::unique_ptr<Semaphore> Semaphore::Create(int initial_count,
                                              int maximum_count) {
-  return std::make_unique<Win32Semaphore>(
-      CreateSemaphore(nullptr, initial_count, maximum_count, nullptr));
+  HANDLE handle =
+      CreateSemaphore(nullptr, initial_count, maximum_count, nullptr);
+  if (handle) {
+    return std::make_unique<Win32Semaphore>(handle);
+  } else {
+    LOG_LASTERROR();
+    return nullptr;
+  }
 }
 
 class Win32Mutant : public Win32Handle<Mutant> {
@@ -283,20 +387,38 @@ class Win32Mutant : public Win32Handle<Mutant> {
 };
 
 std::unique_ptr<Mutant> Mutant::Create(bool initial_owner) {
-  return std::make_unique<Win32Mutant>(
-      CreateMutex(nullptr, initial_owner ? TRUE : FALSE, nullptr));
+  HANDLE handle = CreateMutex(nullptr, initial_owner ? TRUE : FALSE, nullptr);
+  if (handle) {
+    return std::make_unique<Win32Mutant>(handle);
+  } else {
+    LOG_LASTERROR();
+    return nullptr;
+  }
 }
 
 class Win32Timer : public Win32Handle<Timer> {
+  using WClock_ = Timer::WClock_;
+  using GClock_ = Timer::GClock_;
+
  public:
   explicit Win32Timer(HANDLE handle) : Win32Handle(handle) {}
   ~Win32Timer() = default;
-  bool SetOnce(std::chrono::nanoseconds due_time,
-               std::function<void()> opt_callback) override {
+
+  bool SetOnceAfter(xe::chrono::hundrednanoseconds rel_time,
+                    std::function<void()> opt_callback) override {
+    return SetOnceAt(WClock_::now() + rel_time, std::move(opt_callback));
+  }
+  bool SetOnceAt(GClock_::time_point due_time,
+                 std::function<void()> opt_callback) override {
+    return SetOnceAt(date::clock_cast<WClock_>(due_time),
+                     std::move(opt_callback));
+  }
+  bool SetOnceAt(WClock_::time_point due_time,
+                 std::function<void()> opt_callback) override {
     std::lock_guard<std::mutex> lock(mutex_);
     callback_ = std::move(opt_callback);
     LARGE_INTEGER due_time_li;
-    due_time_li.QuadPart = due_time.count() / 100;
+    due_time_li.QuadPart = WClock_::to_file_time(due_time);
     auto completion_routine =
         callback_ ? reinterpret_cast<PTIMERAPCROUTINE>(CompletionRoutine)
                   : NULL;
@@ -305,13 +427,26 @@ class Win32Timer : public Win32Handle<Timer> {
                ? true
                : false;
   }
-  bool SetRepeating(std::chrono::nanoseconds due_time,
-                    std::chrono::milliseconds period,
-                    std::function<void()> opt_callback) override {
+
+  bool SetRepeatingAfter(
+      xe::chrono::hundrednanoseconds rel_time, std::chrono::milliseconds period,
+      std::function<void()> opt_callback = nullptr) override {
+    return SetRepeatingAt(WClock_::now() + rel_time, period,
+                          std::move(opt_callback));
+  }
+  bool SetRepeatingAt(GClock_::time_point due_time,
+                      std::chrono::milliseconds period,
+                      std::function<void()> opt_callback = nullptr) override {
+    return SetRepeatingAt(date::clock_cast<WClock_>(due_time), period,
+                          std::move(opt_callback));
+  }
+  bool SetRepeatingAt(WClock_::time_point due_time,
+                      std::chrono::milliseconds period,
+                      std::function<void()> opt_callback) override {
     std::lock_guard<std::mutex> lock(mutex_);
     callback_ = std::move(opt_callback);
     LARGE_INTEGER due_time_li;
-    due_time_li.QuadPart = due_time.count() / 100;
+    due_time_li.QuadPart = WClock_::to_file_time(due_time);
     auto completion_routine =
         callback_ ? reinterpret_cast<PTIMERAPCROUTINE>(CompletionRoutine)
                   : NULL;
@@ -320,6 +455,7 @@ class Win32Timer : public Win32Handle<Timer> {
                ? true
                : false;
   }
+
   bool Cancel() override {
     // Reset the callback immediately so that any completions don't call it.
     std::lock_guard<std::mutex> lock(mutex_);
@@ -344,11 +480,23 @@ class Win32Timer : public Win32Handle<Timer> {
 };
 
 std::unique_ptr<Timer> Timer::CreateManualResetTimer() {
-  return std::make_unique<Win32Timer>(CreateWaitableTimer(NULL, TRUE, NULL));
+  HANDLE handle = CreateWaitableTimer(NULL, TRUE, NULL);
+  if (handle) {
+    return std::make_unique<Win32Timer>(handle);
+  } else {
+    LOG_LASTERROR();
+    return nullptr;
+  }
 }
 
 std::unique_ptr<Timer> Timer::CreateSynchronizationTimer() {
-  return std::make_unique<Win32Timer>(CreateWaitableTimer(NULL, FALSE, NULL));
+  HANDLE handle = CreateWaitableTimer(NULL, FALSE, NULL);
+  if (handle) {
+    return std::make_unique<Win32Timer>(handle);
+  } else {
+    LOG_LASTERROR();
+    return nullptr;
+  }
 }
 
 class Win32Thread : public Win32Handle<Thread> {
@@ -450,15 +598,13 @@ std::unique_ptr<Thread> Thread::Create(CreationParameters params,
   HANDLE handle =
       CreateThread(NULL, params.stack_size, ThreadStartRoutine, start_data,
                    params.create_suspended ? CREATE_SUSPENDED : 0, NULL);
-  if (handle == INVALID_HANDLE_VALUE) {
-    // TODO(benvanik): pass back?
-    auto last_error = GetLastError();
-    XELOGE("Unable to CreateThread: {}", last_error);
+  if (handle) {
+    return std::make_unique<Win32Thread>(handle);
+  } else {
+    LOG_LASTERROR();
     delete start_data;
     return nullptr;
   }
-
-  return std::make_unique<Win32Thread>(handle);
 }
 
 Thread* Thread::GetCurrentThread() {

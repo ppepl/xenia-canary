@@ -18,6 +18,7 @@
 #include "xenia/base/string.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/emulator.h"
+#include "xenia/hid/input_system.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_module.h"
@@ -27,6 +28,8 @@
 #include "xenia/kernel/xnotifylistener.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
+
+DEFINE_bool(apply_title_update, true, "Apply title updates.", "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -49,7 +52,8 @@ KernelState::KernelState(Emulator* emulator)
   file_system_ = emulator->file_system();
 
   app_manager_ = std::make_unique<xam::AppManager>();
-  user_profile_ = std::make_unique<xam::UserProfile>();
+  achievement_manager_ = std::make_unique<AchievementManager>();
+  user_profiles_.emplace(0, std::make_unique<xam::UserProfile>(0));
 
   auto content_root = emulator_->content_root();
   if (!content_root.empty()) {
@@ -104,6 +108,26 @@ uint32_t KernelState::title_id() const {
   return 0;
 }
 
+util::XdbfGameData KernelState::title_xdbf() const {
+  return module_xdbf(executable_module_);
+}
+
+util::XdbfGameData KernelState::module_xdbf(
+    object_ref<UserModule> exec_module) const {
+  assert_not_null(exec_module);
+
+  uint32_t resource_data = 0;
+  uint32_t resource_size = 0;
+  if (XSUCCEEDED(exec_module->GetSection(
+          fmt::format("{:08X}", exec_module->title_id()).c_str(),
+          &resource_data, &resource_size))) {
+    util::XdbfGameData db(memory()->TranslateVirtual(resource_data),
+                          resource_size);
+    return db;
+  }
+  return util::XdbfGameData(nullptr, resource_size);
+}
+
 uint32_t KernelState::process_type() const {
   auto pib =
       memory_->TranslateVirtual<ProcessInfoBlock*>(process_info_block_address_);
@@ -118,7 +142,17 @@ void KernelState::set_process_type(uint32_t value) {
 
 uint32_t KernelState::AllocateTLS() { return uint32_t(tls_bitmap_.Acquire()); }
 
-void KernelState::FreeTLS(uint32_t slot) { tls_bitmap_.Release(slot); }
+void KernelState::FreeTLS(uint32_t slot) {
+  const std::vector<object_ref<XThread>> threads =
+      object_table()->GetObjectsByType<XThread>();
+
+  for (const object_ref<XThread>& thread : threads) {
+    if (thread->is_guest_thread()) {
+      thread->SetTLSValue(slot, 0);
+    }
+  }
+  tls_bitmap_.Release(slot);
+}
 
 void KernelState::RegisterTitleTerminateNotification(uint32_t routine,
                                                      uint32_t priority) {
@@ -404,8 +438,23 @@ object_ref<UserModule> KernelState::LoadUserModule(
     // Putting into the listing automatically retains.
     user_modules_.push_back(module);
   }
+  return module;
+}
 
+X_RESULT KernelState::FinishLoadingUserModule(
+    const object_ref<UserModule> module, bool call_entry) {
+  // TODO(Gliniak): Apply custom patches here
+  X_RESULT result = module->LoadContinue();
+  if (XFAILED(result)) {
+    return result;
+  }
   module->Dump();
+  emulator_->patcher()->ApplyPatchesForTitle(memory_, module->title_id(),
+                                             module->hash());
+  emulator_->on_patch_apply();
+  if (module->xex_module()) {
+    module->xex_module()->Precompile();
+  }
 
   if (module->is_dll_module() && module->entry_point() && call_entry) {
     // Call DllMain(DLL_PROCESS_ATTACH):
@@ -419,8 +468,58 @@ object_ref<UserModule> KernelState::LoadUserModule(
     processor()->Execute(thread_state, module->entry_point(), args,
                          xe::countof(args));
   }
+  return result;
+}
 
-  return module;
+X_RESULT KernelState::ApplyTitleUpdate(const object_ref<UserModule> module) {
+  X_RESULT result = X_STATUS_SUCCESS;
+  if (!cvars::apply_title_update) {
+    return result;
+  }
+
+  std::vector<xam::XCONTENT_AGGREGATE_DATA> tu_list =
+      content_manager()->ListContent(1, xe::XContentType::kInstaller,
+                                     module->title_id());
+
+  if (tu_list.empty()) {
+    return result;
+  }
+
+  uint32_t disc_number = -1;
+  if (module->is_multi_disc_title()) {
+    disc_number = module->disc_number();
+  }
+  // TODO(Gliniak): Support for selecting from multiple TUs
+  const xam::XCONTENT_AGGREGATE_DATA& title_update = tu_list.front();
+  X_RESULT open_status =
+      content_manager()->OpenContent("UPDATE", title_update, disc_number);
+
+  // Use the corresponding patch for the launch module
+  std::filesystem::path patch_xexp = fmt::format("{0}.xexp", module->name());
+
+  std::string resolved_path = "";
+  file_system()->FindSymbolicLink("UPDATE:", resolved_path);
+  xe::vfs::Entry* patch_entry = kernel_state()->file_system()->ResolvePath(
+      resolved_path + patch_xexp.generic_string());
+
+  if (patch_entry) {
+    const std::string patch_path = patch_entry->absolute_path();
+    XELOGI("Loading XEX patch from {}", patch_path);
+    auto patch_module = object_ref<UserModule>(new UserModule(this));
+
+    result = patch_module->LoadFromFile(patch_path);
+    if (result != X_STATUS_SUCCESS) {
+      XELOGE("Failed to load XEX patch, code: {}", result);
+      return X_STATUS_UNSUCCESSFUL;
+    }
+
+    result = patch_module->xex_module()->ApplyPatch(module->xex_module());
+    if (result != X_STATUS_SUCCESS) {
+      XELOGE("Failed to apply XEX patch, code: {}", result);
+      return X_STATUS_UNSUCCESSFUL;
+    }
+  }
+  return result;
 }
 
 void KernelState::UnloadUserModule(const object_ref<UserModule>& module,
@@ -453,7 +552,7 @@ void KernelState::UnloadUserModule(const object_ref<UserModule>& module,
                              return e->path() == module->path();
                            }) == user_modules_.end());
 
-  object_table()->ReleaseHandle(module->handle());
+  object_table()->ReleaseHandleInLock(module->handle());
 }
 
 void KernelState::TerminateTitle() {
@@ -632,12 +731,6 @@ void KernelState::RegisterNotifyListener(XNotifyListener* listener) {
     // XN_SYS_SIGNINCHANGED x2
     listener->EnqueueNotification(0x0000000A, 1);
     listener->EnqueueNotification(0x0000000A, 1);
-    // XN_SYS_INPUTDEVICESCHANGED x2
-    listener->EnqueueNotification(0x00000012, 0);
-    listener->EnqueueNotification(0x00000012, 0);
-    // XN_SYS_INPUTDEVICECONFIGCHANGED x2
-    listener->EnqueueNotification(0x00000013, 0);
-    listener->EnqueueNotification(0x00000013, 0);
   }
 }
 
@@ -751,6 +844,14 @@ void KernelState::CompleteOverlappedDeferredEx(
   auto ptr = memory()->TranslateVirtual(overlapped_ptr);
   XOverlappedSetResult(ptr, X_ERROR_IO_PENDING);
   XOverlappedSetContext(ptr, XThread::GetCurrentThreadHandle());
+  X_HANDLE event_handle = XOverlappedGetEvent(ptr);
+  if (event_handle) {
+    auto ev = object_table()->LookupObject<XEvent>(event_handle);
+    assert_not_null(ev);
+    if (ev) {
+      ev->Reset();
+    }
+  }
   auto global_lock = global_critical_region_.Acquire();
   dispatch_queue_.push_back([this, completion_callback, overlapped_ptr,
                              pre_callback, post_callback]() {
@@ -881,6 +982,32 @@ bool KernelState::Restore(ByteStream* stream) {
   }
 
   return true;
+}
+
+uint8_t KernelState::GetConnectedUsers() const {
+  auto input_sys = emulator_->input_system();
+
+  auto lock = input_sys->lock();
+
+  return input_sys->GetConnectedSlots();
+}
+
+void KernelState::UpdateUsedUserProfiles() {
+  const uint8_t used_slots_bitmask = GetConnectedUsers();
+
+  for (uint32_t i = 1; i < 4; i++) {
+    bool is_used = used_slots_bitmask & (1 << i);
+
+    if (IsUserSignedIn(i) && !is_used) {
+      user_profiles_.erase(i);
+      BroadcastNotification(0x12, 0);
+    }
+
+    if (!IsUserSignedIn(i) && is_used) {
+      user_profiles_.emplace(i, std::make_unique<xam::UserProfile>(i));
+      BroadcastNotification(0x12, 0);
+    }
+  }
 }
 
 }  // namespace kernel

@@ -8,6 +8,7 @@
  */
 
 #include "xenia/cpu/hir/value.h"
+#include "xenia/cpu/hir/instr.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -15,13 +16,13 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/math.h"
-
+#include "xenia/cpu/hir/hir_builder.h"
 namespace xe {
 namespace cpu {
 namespace hir {
 
 Value::Use* Value::AddUse(Arena* arena, Instr* instr) {
-  Use* use = arena->Alloc<Use>();
+  Use* use = HIRBuilder::GetCurrent()->AllocateUse();
   use->instr = instr;
   use->prev = NULL;
   use->next = use_head;
@@ -41,6 +42,8 @@ void Value::RemoveUse(Use* use) {
   if (use->next) {
     use->next->prev = use->prev;
   }
+
+  //HIRBuilder::GetCurrent()->DeallocateUse(use);
 }
 
 uint32_t Value::AsUint32() {
@@ -198,7 +201,7 @@ void Value::Truncate(TypeName target_type) {
       return;
   }
 }
-
+// WARNING: this does not handle rounding flags at all!
 void Value::Convert(TypeName target_type, RoundMode round_mode) {
   switch (type) {
     case FLOAT32_TYPE:
@@ -400,7 +403,7 @@ void Value::MulHi(Value* other, bool is_unsigned) {
                       32);
       }
       break;
-    case INT64_TYPE:
+    case INT64_TYPE: {
 #if XE_COMPILER_MSVC
       if (is_unsigned) {
         constant.i64 = __umulh(constant.i64, other->constant.i64);
@@ -408,52 +411,76 @@ void Value::MulHi(Value* other, bool is_unsigned) {
         constant.i64 = __mulh(constant.i64, other->constant.i64);
       }
 #else
+      unsigned __int128 product;
       if (is_unsigned) {
-        constant.i64 = static_cast<uint64_t>(
-            static_cast<unsigned __int128>(constant.i64) *
-            static_cast<unsigned __int128>(other->constant.i64));
+        product = static_cast<unsigned __int128>(constant.i64) *
+                  static_cast<unsigned __int128>(other->constant.i64);
       } else {
-        constant.i64 =
-            static_cast<uint64_t>(static_cast<__int128>(constant.i64) *
-                                  static_cast<__int128>(other->constant.i64));
+        product = static_cast<unsigned __int128>(
+            static_cast<__int128>(constant.i64) *
+            static_cast<__int128>(other->constant.i64));
       }
+      constant.i64 = static_cast<int64_t>(product >> 64);
 #endif  // XE_COMPILER_MSVC
       break;
+    }
     default:
       assert_unhandled_case(type);
       break;
   }
 }
 
+template <typename T>
+static T PPCUDiv(T numer, T denom) {
+  if (!denom) {
+    return 0;
+  } else {
+    return numer / denom;
+  }
+}
+template <typename T>
+static T PPCIDiv(T numer, T denom) {
+  if (!denom) {
+    return 0;
+  } else if (numer == static_cast<T>(1LL << ((sizeof(T) * CHAR_BIT) - 1)) &&
+             !~denom) {  // if numer is signbit and denom is all ones, signed
+                         // oflow
+    return 0;
+  } else {
+    return numer / denom;
+  }
+}
+
+// warning : we tolerate division by 0 in x64_sequences, but here we do not
 void Value::Div(Value* other, bool is_unsigned) {
   assert_true(type == other->type);
   switch (type) {
     case INT8_TYPE:
       if (is_unsigned) {
-        constant.i8 /= uint8_t(other->constant.i8);
+        constant.i8 = PPCUDiv<uint8_t>(constant.i8, other->constant.i8);
       } else {
-        constant.i8 /= other->constant.i8;
+        constant.i8 = PPCIDiv<int8_t>(constant.i8, other->constant.i8);
       }
       break;
     case INT16_TYPE:
       if (is_unsigned) {
-        constant.i16 /= uint16_t(other->constant.i16);
+        constant.i16 = PPCUDiv<uint16_t>(constant.i16, other->constant.i16);
       } else {
-        constant.i16 /= other->constant.i16;
+        constant.i16 = PPCIDiv<int16_t>(constant.i16, other->constant.i16);
       }
       break;
     case INT32_TYPE:
       if (is_unsigned) {
-        constant.i32 /= uint32_t(other->constant.i32);
+        constant.i32 = PPCUDiv<uint32_t>(constant.i32, other->constant.i32);
       } else {
-        constant.i32 /= other->constant.i32;
+        constant.i32 = PPCIDiv<int32_t>(constant.i32, other->constant.i32);
       }
       break;
     case INT64_TYPE:
       if (is_unsigned) {
-        constant.i64 /= uint64_t(other->constant.i64);
+        constant.i64 = PPCUDiv<uint64_t>(constant.i64, other->constant.i64);
       } else {
-        constant.i64 /= other->constant.i64;
+        constant.i64 = PPCIDiv<int64_t>(constant.i64, other->constant.i64);
       }
       break;
     case FLOAT32_TYPE:
@@ -490,52 +517,6 @@ void Value::Max(Value* other) {
       break;
     default:
       assert_unhandled_case(type);
-      break;
-  }
-}
-
-void Value::MulAdd(Value* dest, Value* value1, Value* value2, Value* value3) {
-  switch (dest->type) {
-    case VEC128_TYPE:
-      for (int i = 0; i < 4; i++) {
-        dest->constant.v128.f32[i] =
-            (value1->constant.v128.f32[i] * value2->constant.v128.f32[i]) +
-            value3->constant.v128.f32[i];
-      }
-      break;
-    case FLOAT32_TYPE:
-      dest->constant.f32 =
-          (value1->constant.f32 * value2->constant.f32) + value3->constant.f32;
-      break;
-    case FLOAT64_TYPE:
-      dest->constant.f64 =
-          (value1->constant.f64 * value2->constant.f64) + value3->constant.f64;
-      break;
-    default:
-      assert_unhandled_case(dest->type);
-      break;
-  }
-}
-
-void Value::MulSub(Value* dest, Value* value1, Value* value2, Value* value3) {
-  switch (dest->type) {
-    case VEC128_TYPE:
-      for (int i = 0; i < 4; i++) {
-        dest->constant.v128.f32[i] =
-            (value1->constant.v128.f32[i] * value2->constant.v128.f32[i]) -
-            value3->constant.v128.f32[i];
-      }
-      break;
-    case FLOAT32_TYPE:
-      dest->constant.f32 =
-          (value1->constant.f32 * value2->constant.f32) - value3->constant.f32;
-      break;
-    case FLOAT64_TYPE:
-      dest->constant.f64 =
-          (value1->constant.f64 * value2->constant.f64) - value3->constant.f64;
-      break;
-    default:
-      assert_unhandled_case(dest->type);
       break;
   }
 }
@@ -750,6 +731,13 @@ void Value::Not() {
   }
 }
 
+void Value::AndNot(Value* other) {
+  assert_true(type == other->type);
+  Value second = Value(*other);
+  second.Not();
+  And(&second);
+}
+
 void Value::Shl(Value* other) {
   assert_true(other->type == INT8_TYPE);
   switch (type) {
@@ -813,6 +801,29 @@ void Value::Sha(Value* other) {
   }
 }
 
+void Value::RotateLeft(Value* other) {
+  assert_true(other->type == INT8_TYPE);
+  auto rotation = other->constant.u8;
+
+  switch (type) {
+    case INT8_TYPE:
+      constant.u8 = rotate_left<uint8_t>(constant.u8, rotation);
+      break;
+    case INT16_TYPE:
+      constant.u16 = rotate_left<uint16_t>(constant.u16, rotation);
+      break;
+    case INT32_TYPE:
+      constant.u32 = rotate_left<uint32_t>(constant.u32, rotation);
+      break;
+    case INT64_TYPE:
+      constant.u64 = rotate_left<uint64_t>(constant.u64, rotation);
+      break;
+    default:
+      assert_unhandled_case(type);
+      break;
+  }
+}
+
 void Value::Extract(Value* vec, Value* index) {
   assert_true(vec->type == VEC128_TYPE);
   switch (type) {
@@ -833,10 +844,112 @@ void Value::Extract(Value* vec, Value* index) {
       break;
   }
 }
+void Value::Permute(Value* src1, Value* src2, TypeName type) {
+  if (type == INT8_TYPE) {
+    uint8_t table[32];
 
+    for (uint32_t i = 0; i < 16; ++i) {
+      table[i] = src1->constant.v128.u8[i];
+      table[i + 16] = src2->constant.v128.u8[i];
+    }
+
+    for (uint32_t i = 0; i < 16; ++i) {
+      constant.v128.u8[i] = table[(constant.v128.u8[i] ^ 3) & 0x1f];
+    }
+  } else if (type == INT16_TYPE) {
+    vec128_t perm = (constant.v128 & vec128s(0xF)) ^ vec128s(0x1);
+    vec128_t perm_ctrl = vec128b(0);
+    for (int i = 0; i < 8; i++) {
+      perm_ctrl.i16[i] = perm.i16[i] > 7 ? -1 : 0;
+
+      auto v = uint8_t(perm.u16[i]);
+      perm.u8[i * 2] = v * 2;
+      perm.u8[i * 2 + 1] = v * 2 + 1;
+    }
+    auto lod = [](const vec128_t& v) {
+      return _mm_loadu_si128((const __m128i*)&v);
+    };
+    auto sto = [](vec128_t& v, __m128i x) {
+      return _mm_storeu_si128((__m128i*)&v, x);
+    };
+
+    __m128i xmm1 = lod(src1->constant.v128);
+    __m128i xmm2 = lod(src2->constant.v128);
+    xmm1 = _mm_shuffle_epi8(xmm1, lod(perm));
+    xmm2 = _mm_shuffle_epi8(xmm2, lod(perm));
+    uint8_t mask = 0;
+    for (int i = 0; i < 8; i++) {
+      if (perm_ctrl.i16[i] == 0) {
+        mask |= 1 << (7 - i);
+      }
+    }
+
+    vec128_t unp_mask = vec128b(0);
+    for (int i = 0; i < 8; i++) {
+      if (mask & (1 << i)) {
+        unp_mask.u16[i] = 0xFFFF;
+      }
+    }
+
+    sto(constant.v128, _mm_blendv_epi8(xmm1, xmm2, lod(unp_mask)));
+
+  } else {
+    assert_unhandled_case(type);
+  }
+}
+void Value::Insert(Value* index, Value* part, TypeName type) {
+  vec128_t* me = &constant.v128;
+
+  switch (type) {
+    case INT8_TYPE:
+      me->u8[index->constant.u8 ^ 3] = part->constant.u8;
+      break;
+    case INT16_TYPE:
+      me->u16[index->constant.u8 ^ 1] = part->constant.u16;
+      break;
+    case INT32_TYPE:
+      me->u32[index->constant.u8] = part->constant.u32;
+      break;
+  }
+}
+void Value::Swizzle(uint32_t mask, TypeName type) {
+  if (type == INT32_TYPE || type == FLOAT32_TYPE) {
+    vec128_t result = vec128b(0);
+    for (uint32_t i = 0; i < 4; ++i) {
+      result.u32[i] = constant.v128.u32[(mask >> (i * 2)) & 0b11];
+    }
+    constant.v128 = result;
+  } else {
+    assert_unhandled_case(type);
+  }
+}
 void Value::Select(Value* other, Value* ctrl) {
-  // TODO
-  assert_always();
+  if (ctrl->type == VEC128_TYPE) {
+    constant.v128.low = (constant.v128.low & ~ctrl->constant.v128.low) |
+                        (other->constant.v128.low & ctrl->constant.v128.low);
+    constant.v128.high = (constant.v128.high & ~ctrl->constant.v128.high) |
+                         (other->constant.v128.high & ctrl->constant.v128.high);
+
+  } else {
+    if (ctrl->constant.u8) {
+      switch (other->type) {
+        case INT8_TYPE:
+          constant.u8 = other->constant.u8;
+          break;
+        case INT16_TYPE:
+          constant.u16 = other->constant.u16;
+          break;
+        case INT32_TYPE:
+        case FLOAT32_TYPE:
+          constant.u32 = other->constant.u32;
+          break;
+        case INT64_TYPE:
+        case FLOAT64_TYPE:
+          constant.u64 = other->constant.u64;
+          break;
+      }
+    }
+  }
 }
 
 void Value::Splat(Value* other) {
@@ -1384,14 +1497,17 @@ void Value::DotProduct3(Value* other) {
   assert_true(this->type == VEC128_TYPE && other->type == VEC128_TYPE);
   switch (type) {
     case VEC128_TYPE: {
-      alignas(16) float result[4];
-      __m128 src1 = _mm_load_ps(constant.v128.f32);
-      __m128 src2 = _mm_load_ps(other->constant.v128.f32);
-      __m128 dest = _mm_dp_ps(src1, src2, 0b01110001);
-      _mm_store_ps(result, dest);
       // TODO(rick): is this sane?
       type = FLOAT32_TYPE;
-      constant.f32 = result[0];
+      // Using x86 DPPS ordering for consistency with x86-64 code generation:
+      // (X1 * X2 + Y1 * Y2) + (Z1 * Z2 + 0.0f)
+      // (+ 0.0f for zero sign, as zero imm8[4:7] bits result in zero terms,
+      // not in complete exclusion of them)
+      // TODO(Triang3l): NaN on overflow.
+      constant.f32 =
+          (constant.v128.f32[0] * other->constant.v128.f32[0] +
+           constant.v128.f32[1] * other->constant.v128.f32[1]) +
+          (constant.v128.f32[2] * other->constant.v128.f32[2] + 0.0f);
     } break;
     default:
       assert_unhandled_case(type);
@@ -1403,14 +1519,15 @@ void Value::DotProduct4(Value* other) {
   assert_true(this->type == VEC128_TYPE && other->type == VEC128_TYPE);
   switch (type) {
     case VEC128_TYPE: {
-      alignas(16) float result[4];
-      __m128 src1 = _mm_load_ps(constant.v128.f32);
-      __m128 src2 = _mm_load_ps(other->constant.v128.f32);
-      __m128 dest = _mm_dp_ps(src1, src2, 0b11110001);
-      _mm_store_ps(result, dest);
       // TODO(rick): is this sane?
       type = FLOAT32_TYPE;
-      constant.f32 = result[0];
+      // Using x86 DPPS ordering for consistency with x86-64 code generation:
+      // (X1 * X2 + Y1 * Y2) + (Z1 * Z2 + W1 * W2)
+      // TODO(Triang3l): NaN on overflow.
+      constant.f32 = (constant.v128.f32[0] * other->constant.v128.f32[0] +
+                      constant.v128.f32[1] * other->constant.v128.f32[1]) +
+                     (constant.v128.f32[2] * other->constant.v128.f32[2] +
+                      constant.v128.f32[3] * other->constant.v128.f32[3]);
     } break;
     default:
       assert_unhandled_case(type);
@@ -1495,6 +1612,15 @@ void Value::ByteSwap() {
     default:
       assert_unhandled_case(type);
       break;
+  }
+}
+void Value::DenormalFlush() {
+  for (int i = 0; i < 4; ++i) {
+    uint32_t current_element = constant.v128.u32[i];
+    if ((current_element & 0x7f800000) == 0) {
+      current_element = current_element & 0x80000000;
+    }
+    constant.v128.u32[i] = current_element;
   }
 }
 
@@ -1646,7 +1772,39 @@ bool Value::CompareInt64(Opcode opcode, Value* a, Value* b) {
       return false;
   }
 }
+hir::Instr* Value::GetDefSkipAssigns() {
+  if (def) {
+    return def->GetDestDefSkipAssigns();
+  } else {
+    return nullptr;
+  }
+}
+hir::Instr* Value::GetDefTunnelMovs(unsigned int* tunnel_flags) {
+  if (def) {
+    return def->GetDestDefTunnelMovs(tunnel_flags);
+  } else {
+    return nullptr;
+  }
+}
+// does the value only have one instr that uses it?
+bool Value::HasSingleUse() const {
+  return use_head && use_head->next == nullptr;
+}
+bool Value::AllUsesByOneInsn() const {
+  if (!use_head) {
+    return false;
+  }
+  const Use* first_use = use_head;
+  const Instr* should_match = first_use->instr;
 
+  for (const Use* current_use = first_use->next; current_use;
+       current_use = current_use->next) {
+    if (current_use->instr != should_match) {
+      return false;
+    }
+  }
+  return true;
+}
 }  // namespace hir
 }  // namespace cpu
 }  // namespace xe

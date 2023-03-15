@@ -19,10 +19,11 @@
 #include <utility>
 #include <vector>
 
+#include "xenia/base/byte_order.h"
 #include "xenia/base/math.h"
 #include "xenia/base/string_buffer.h"
+#include "xenia/gpu/registers.h"
 #include "xenia/gpu/ucode.h"
-#include "xenia/gpu/xenos.h"
 
 namespace xe {
 namespace gpu {
@@ -44,7 +45,7 @@ namespace gpu {
 enum class InstructionStorageTarget {
   // Result is not stored.
   kNone,
-  // Result is stored to a temporary register indexed by storage_index [0-31].
+  // Result is stored to a temporary register indexed by storage_index [0-63].
   kRegister,
   // Result is stored into a vertex shader interpolator export [0-15].
   kInterpolator,
@@ -85,11 +86,13 @@ constexpr uint32_t GetInstructionStorageTargetUsedComponentCount(
 
 enum class InstructionStorageAddressingMode {
   // The storage index is not dynamically addressed.
-  kStatic,
+  kAbsolute,
   // The storage index is addressed by a0.
-  kAddressAbsolute,
+  // Float constants only.
+  kAddressRegisterRelative,
   // The storage index is addressed by aL.
-  kAddressRelative,
+  // Float constants and temporary registers only.
+  kLoopRelative,
 };
 
 // Describes the source value of a particular component.
@@ -111,6 +114,12 @@ enum class SwizzleSource {
 constexpr SwizzleSource GetSwizzleFromComponentIndex(uint32_t i) {
   return static_cast<SwizzleSource>(i);
 }
+constexpr SwizzleSource GetSwizzledAluSourceComponent(
+    uint32_t swizzle, uint32_t component_index) {
+  return GetSwizzleFromComponentIndex(
+      ucode::AluInstruction::GetSwizzledComponentIndex(swizzle,
+                                                       component_index));
+}
 inline char GetCharForComponentIndex(uint32_t i) {
   const static char kChars[] = {'x', 'y', 'z', 'w'};
   return kChars[i];
@@ -127,7 +136,7 @@ struct InstructionResult {
   uint32_t storage_index = 0;
   // How the storage index is dynamically addressed, if it is.
   InstructionStorageAddressingMode storage_addressing_mode =
-      InstructionStorageAddressingMode::kStatic;
+      InstructionStorageAddressingMode::kAbsolute;
   // True to clamp the result value to [0-1].
   bool is_clamped = false;
   // Defines whether each output component is written, though this is from the
@@ -191,9 +200,9 @@ struct InstructionResult {
 };
 
 enum class InstructionStorageSource {
-  // Source is stored in a temporary register indexed by storage_index [0-31].
+  // Source is stored in a temporary register indexed by storage_index [0-63].
   kRegister,
-  // Source is stored in a float constant indexed by storage_index [0-511].
+  // Source is stored in a float constant indexed by storage_index [0-255].
   kConstantFloat,
   // Source is stored in a vertex fetch constant indexed by storage_index
   // [0-95].
@@ -210,7 +219,7 @@ struct InstructionOperand {
   uint32_t storage_index = 0;
   // How the storage index is dynamically addressed, if it is.
   InstructionStorageAddressingMode storage_addressing_mode =
-      InstructionStorageAddressingMode::kStatic;
+      InstructionStorageAddressingMode::kAbsolute;
   // True to negate the operand value.
   bool is_negated = false;
   // True to take the absolute value of the source (before any negation).
@@ -293,8 +302,9 @@ struct ParsedExecInstruction {
 
   // Whether this exec ends the shader.
   bool is_end = false;
-  // Whether to reset the current predicate.
-  bool clean = true;
+  // Whether the hardware doesn't have to wait for the predicate to be updated
+  // after this exec.
+  bool is_predicate_clean = true;
   // ?
   bool is_yield = false;
 
@@ -435,11 +445,23 @@ struct ParsedVertexFetchInstruction {
   bool predicate_condition = false;
 
   // Describes how the instruction result is stored.
+  // Note that if the result doesn't have any components to write the fetched
+  // value to, the address calculation in vfetch_full must still be performed
+  // because such a vfetch_full may be used to setup addressing for vfetch_mini
+  // (wires in the color pass of 5454082B do vfetch_full to r2.000_, and then a
+  // true vfetch_mini).
   InstructionResult result;
 
   // Number of source operands.
   size_t operand_count = 0;
   // Describes each source operand.
+  // Note that for vfetch_mini, which inherits the operands from vfetch_full,
+  // the index operand register may been overwritten between the vfetch_full and
+  // the vfetch_mini (happens in 4D530910 for wheels), but that should have no
+  // effect on the index actually used for fetching. A copy of the index
+  // therefore must be stored by vfetch_full (the base address, stride and
+  // rounding may be pre-applied to it since they will be the same in the
+  // vfetch_full and all its vfetch_mini instructions).
   InstructionOperand operands[2];
 
   struct Attributes {
@@ -540,12 +562,12 @@ struct ParsedAluInstruction {
   // instruction even if only constants are being exported. The XNA disassembler
   // falls back to displaying the whole vector operation, even if only constant
   // components are written, if the scalar operation is a nop or if the vector
-  // operation has side effects (but if the scalar operation isn't nop, it
-  // outputs the entire constant mask in the scalar operation destination).
-  // Normally the XNA disassembler outputs the constant mask in both vector and
-  // scalar operations, but that's not required by assembler, so it doesn't
-  // really matter whether it's specified in the vector operation, in the scalar
-  // operation, or in both.
+  // operation changes a0, p0 or kills pixels (but if the scalar operation isn't
+  // nop, it outputs the entire constant mask in the scalar operation
+  // destination). Normally the XNA disassembler outputs the constant mask in
+  // both vector and scalar operations, but that's not required by assembler, so
+  // it doesn't really matter whether it's specified in the vector operation, in
+  // the scalar operation, or in both.
   InstructionResult vector_and_constant_result;
   // Describes how the scalar operation result is stored.
   InstructionResult scalar_result;
@@ -570,8 +592,8 @@ struct ParsedAluInstruction {
   // will result in the same microcode (since instructions with just an empty
   // write mask may have different values in other fields).
   // This is for disassembly! Translators should use the write masks and
-  // AluVectorOpHasSideEffects to skip operations, as this only covers one very
-  // specific nop format!
+  // the changed state bits in the opcode info to skip operations, as this only
+  // covers one very specific nop format!
   bool IsVectorOpDefaultNop() const;
   // Whether the scalar part of the instruction is the same as if it was omitted
   // in the assembly (if compiled or assembled with the Xbox 360 shader
@@ -630,22 +652,44 @@ void ParseAluInstruction(const ucode::AluInstruction& op,
 
 class Shader {
  public:
-  // Type of the vertex shader in a D3D11-like rendering pipeline - shader
-  // interface depends on in, so it must be known at translation time.
-  // If values are changed, INVALIDATE SHADER STORAGES (increase their version
-  // constexpr) where those are stored! And check bit count where this is
-  // packed. This is : uint32_t for simplicity of packing in bit fields.
+  // Type of the vertex shader on the host - shader interface depends on in, so
+  // it must be known at translation time. If values are changed, INVALIDATE
+  // SHADER STORAGES (increase their version constexpr) where those are stored!
+  // And check bit count where this is packed. This is : uint32_t for simplicity
+  // of packing in bit fields.
   enum class HostVertexShaderType : uint32_t {
     kVertex,
-    kLineDomainCPIndexed,
+
+    kDomainStart,
+    kLineDomainCPIndexed = kDomainStart,
     kLineDomainPatchIndexed,
     kTriangleDomainCPIndexed,
     kTriangleDomainPatchIndexed,
     kQuadDomainCPIndexed,
     kQuadDomainPatchIndexed,
+    kDomainEnd,
+
+    // For implementation without unconditional support for memory writes from
+    // vertex shaders, vertex shader converted to a compute shader doing only
+    // memory export.
+    kMemexportCompute,
+
+    // 4 host vertices for 1 guest vertex, for implementations without
+    // unconditional geometry shader support.
+    kPointListAsTriangleStrip,
+    // 3 guest vertices processed by the host shader invocation to choose the
+    // strip orientation, for implementations without unconditional geometry
+    // shader support.
+    kRectangleListAsTriangleStrip,
   };
   // For packing HostVertexShaderType in bit fields.
-  static constexpr uint32_t kHostVertexShaderTypeBitCount = 3;
+  static constexpr uint32_t kHostVertexShaderTypeBitCount = 4;
+
+  static constexpr bool IsHostVertexShaderTypeDomain(
+      HostVertexShaderType host_vertex_shader_type) {
+    return host_vertex_shader_type >= HostVertexShaderType::kDomainStart &&
+           host_vertex_shader_type < HostVertexShaderType::kDomainEnd;
+  }
 
   struct Error {
     bool is_fatal = false;
@@ -689,6 +733,9 @@ class Shader {
     // Bitmap of all bool constants read by the shader.
     // Each bit corresponds to a storage index [0-255].
     uint32_t bool_bitmap[256 / 32];
+    // Bitmap of all vertex fetch constants read by the shader.
+    // Each bit corresponds to a storage index [0-95].
+    uint32_t vertex_fetch_bitmap[96 / 32];
 
     // Total number of kConstantFloat registers read by the shader.
     uint32_t float_count;
@@ -773,6 +820,9 @@ class Shader {
     Translation(Shader& shader, uint64_t modification)
         : shader_(shader), modification_(modification) {}
 
+    // If there was some failure during preparation on the implementation side.
+    void MakeInvalid() { is_valid_ = false; }
+
    private:
     friend class Shader;
     friend class ShaderTranslator;
@@ -787,8 +837,11 @@ class Shader {
     std::string host_disassembly_;
   };
 
+  // ucode_source_endian specifies the endianness of the ucode_dwords argument -
+  // inside the Shader, the ucode will be stored with the native byte order.
   Shader(xenos::ShaderType shader_type, uint64_t ucode_data_hash,
-         const uint32_t* ucode_dwords, size_t ucode_dword_count);
+         const uint32_t* ucode_dwords, size_t ucode_dword_count,
+         std::endian ucode_source_endian = std::endian::big);
   virtual ~Shader();
 
   // Whether the shader is identified as a vertex or pixel shader.
@@ -886,6 +939,27 @@ class Shader {
   // True if the current shader has any `kill` instructions.
   bool kills_pixels() const { return kills_pixels_; }
 
+  // True if the shader has any texture-related instructions (any fetch
+  // instructions other than vertex fetch) writing any non-constant components.
+  bool uses_texture_fetch_instruction_results() const {
+    return uses_texture_fetch_instruction_results_;
+  }
+
+  // Whether each interpolator is written on any execution path.
+  uint32_t writes_interpolators() const { return writes_interpolators_; }
+
+  // Whether the system vertex shader exports are written on any execution path.
+  uint32_t writes_point_size_edge_flag_kill_vertex() const {
+    return writes_point_size_edge_flag_kill_vertex_;
+  }
+
+  // Returns the mask of the interpolators the pixel shader potentially requires
+  // from the vertex shader, and also the PsParamGen destination register, or
+  // UINT32_MAX if it's not needed.
+  uint32_t GetInterpolatorInputMask(reg::SQ_PROGRAM_CNTL sq_program_cntl,
+                                    reg::SQ_CONTEXT_MISC sq_context_misc,
+                                    uint32_t& param_gen_pos_out) const;
+
   // True if the shader overrides the pixel depth.
   bool writes_depth() const { return writes_depth_; }
 
@@ -972,10 +1046,13 @@ class Shader {
   std::set<uint32_t> label_addresses_;
   uint32_t cf_pair_index_bound_ = 0;
   uint32_t register_static_address_bound_ = 0;
+  uint32_t writes_interpolators_ = 0;
+  uint32_t writes_point_size_edge_flag_kill_vertex_ = 0;
+  uint32_t writes_color_targets_ = 0b0000;
   bool uses_register_dynamic_addressing_ = false;
   bool kills_pixels_ = false;
+  bool uses_texture_fetch_instruction_results_ = false;
   bool writes_depth_ = false;
-  uint32_t writes_color_targets_ = 0b0000;
 
   // Modification bits -> translation.
   std::unordered_map<uint64_t, Translation*> translations_;

@@ -117,6 +117,7 @@ class XObject {
   // Instead of receiving address that starts with 0x82... we're receiving
   // one with 0x8A... which causes crash
   static constexpr uint32_t kHandleBase = 0xF8000000;
+  static constexpr uint32_t kHandleHostBase = 0x01000000;
 
   enum class Type : uint32_t {
     Undefined,
@@ -136,7 +137,7 @@ class XObject {
   };
 
   XObject(Type type);
-  XObject(KernelState* kernel_state, Type type);
+  XObject(KernelState* kernel_state, Type type, bool host_object = false);
   virtual ~XObject();
 
   Emulator* emulator() const;
@@ -175,6 +176,9 @@ class XObject {
   static object_ref<XObject> Restore(KernelState* kernel_state, Type type,
                                      ByteStream* stream);
 
+  static constexpr bool is_handle_host_object(X_HANDLE handle) {
+    return handle > XObject::kHandleHostBase && handle < XObject::kHandleBase;
+  };
   // Reference()
   // Dereference()
 
@@ -192,10 +196,12 @@ class XObject {
 
   static object_ref<XObject> GetNativeObject(KernelState* kernel_state,
                                              void* native_ptr,
-                                             int32_t as_type = -1);
+                                             int32_t as_type = -1,
+                                             bool already_locked = false);
   template <typename T>
   static object_ref<T> GetNativeObject(KernelState* kernel_state,
-                                       void* native_ptr, int32_t as_type = -1);
+                                       void* native_ptr, int32_t as_type = -1,
+                                       bool already_locked = false);
 
  protected:
   bool SaveObject(ByteStream* stream);
@@ -362,9 +368,11 @@ object_ref<T> retain_object(T* ptr) {
 
 template <typename T>
 object_ref<T> XObject::GetNativeObject(KernelState* kernel_state,
-                                       void* native_ptr, int32_t as_type) {
+                                       void* native_ptr, int32_t as_type,
+                                       bool already_locked) {
   return object_ref<T>(reinterpret_cast<T*>(
-      GetNativeObject(kernel_state, native_ptr, as_type).release()));
+      GetNativeObject(kernel_state, native_ptr, as_type, already_locked)
+          .release()));
 }
 
 }  // namespace kernel

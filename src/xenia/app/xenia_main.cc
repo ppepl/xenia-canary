@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -17,6 +17,7 @@
 
 #include "xenia/app/discord/discord_presence.h"
 #include "xenia/app/emulator_window.h"
+#include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/debugging.h"
 #include "xenia/base/logging.h"
@@ -28,13 +29,16 @@
 #include "xenia/emulator.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/window.h"
+#include "xenia/ui/window_listener.h"
 #include "xenia/ui/windowed_app.h"
 #include "xenia/ui/windowed_app_context.h"
 #include "xenia/vfs/devices/host_path_device.h"
 
 // Available audio systems:
 #include "xenia/apu/nop/nop_audio_system.h"
+#if !XE_PLATFORM_ANDROID
 #include "xenia/apu/sdl/sdl_audio_system.h"
+#endif  // !XE_PLATFORM_ANDROID
 #if XE_PLATFORM_WIN32
 #include "xenia/apu/xaudio2/xaudio2_audio_system.h"
 #endif  // XE_PLATFORM_WIN32
@@ -48,7 +52,9 @@
 
 // Available input drivers:
 #include "xenia/hid/nop/nop_hid.h"
+#if !XE_PLATFORM_ANDROID
 #include "xenia/hid/sdl/sdl_hid.h"
+#endif  // !XE_PLATFORM_ANDROID
 #if XE_PLATFORM_WIN32
 #include "xenia/hid/winkey/winkey_hid.h"
 #include "xenia/hid/xinput/xinput_hid.h"
@@ -61,8 +67,6 @@ DEFINE_string(gpu, "any", "Graphics system. Use: [any, d3d12, vulkan, null]",
               "GPU");
 DEFINE_string(hid, "any", "Input system. Use: [any, nop, sdl, winkey, xinput]",
               "HID");
-
-DEFINE_bool(fullscreen, false, "Toggles fullscreen", "GPU");
 
 DEFINE_path(
     storage_root, "",
@@ -90,7 +94,7 @@ DEFINE_bool(mount_cache, false, "Enable cache mount", "Storage");
 DEFINE_transient_path(target, "",
                       "Specifies the target .xex or .iso to execute.",
                       "General");
-DEFINE_transient_bool(portable, false,
+DEFINE_transient_bool(portable, true,
                       "Specifies if Xenia should run in portable mode.",
                       "General");
 
@@ -192,6 +196,17 @@ class EmulatorApp final : public xe::ui::WindowedApp {
     }
   };
 
+  class DebugWindowClosedListener final : public xe::ui::WindowListener {
+   public:
+    explicit DebugWindowClosedListener(EmulatorApp& emulator_app)
+        : emulator_app_(emulator_app) {}
+
+    void OnClosing(xe::ui::UIEvent& e) override;
+
+   private:
+    EmulatorApp& emulator_app_;
+  };
+
   explicit EmulatorApp(xe::ui::WindowedAppContext& app_context);
 
   static std::unique_ptr<apu::AudioSystem> CreateAudioSystem(
@@ -202,6 +217,8 @@ class EmulatorApp final : public xe::ui::WindowedApp {
 
   void EmulatorThread();
   void ShutdownEmulatorThreadFromUIThread();
+
+  DebugWindowClosedListener debug_window_closed_listener_;
 
   std::unique_ptr<Emulator> emulator_;
   std::unique_ptr<EmulatorWindow> emulator_window_;
@@ -215,8 +232,15 @@ class EmulatorApp final : public xe::ui::WindowedApp {
   std::thread emulator_thread_;
 };
 
+void EmulatorApp::DebugWindowClosedListener::OnClosing(xe::ui::UIEvent& e) {
+  EmulatorApp* emulator_app = &emulator_app_;
+  emulator_app->emulator_->processor()->set_debug_listener(nullptr);
+  emulator_app->debug_window_.reset();
+}
+
 EmulatorApp::EmulatorApp(xe::ui::WindowedAppContext& app_context)
-    : xe::ui::WindowedApp(app_context, "xenia", "[Path to .iso/.xex]") {
+    : xe::ui::WindowedApp(app_context, "xenia", "[Path to .iso/.xex]"),
+      debug_window_closed_listener_(*this) {
   AddPositionalOption("target");
 }
 
@@ -233,12 +257,85 @@ std::unique_ptr<apu::AudioSystem> EmulatorApp::CreateAudioSystem(
 #if XE_PLATFORM_WIN32
   factory.Add<apu::xaudio2::XAudio2AudioSystem>("xaudio2");
 #endif  // XE_PLATFORM_WIN32
+#if !XE_PLATFORM_ANDROID
   factory.Add<apu::sdl::SDLAudioSystem>("sdl");
+#endif  // !XE_PLATFORM_ANDROID
   factory.Add<apu::nop::NopAudioSystem>("nop");
   return factory.Create(cvars::apu, processor);
 }
 
 std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
+  // While Vulkan is supported by a large variety of operating systems (Windows,
+  // GNU/Linux, Android, also via the MoltenVK translation layer on top of Metal
+  // on macOS and iOS), please don't remove platform-specific GPU backends from
+  // Xenia.
+  //
+  // Regardless of the operating system, having multiple options provides more
+  // stability to users. In case of driver issues, users may try switching
+  // between the available backends. For example, in June 2022, on Nvidia Ampere
+  // (RTX 30xx), Xenia had synchronization issues that resulted in flickering,
+  // most prominently in 4D5307E6, on Direct3D 12 - but the same issue was not
+  // reproducible in the Vulkan backend, however, it used ImageSampleExplicitLod
+  // with explicit gradients for cubemaps, which triggered a different driver
+  // bug on Nvidia (every 1 out of 2x2 pixels receiving junk).
+  //
+  // Specifically on Microsoft platforms, there are a few reasons why supporting
+  // Direct3D 12 is desirable rather than limiting Xenia to Vulkan only:
+  // - Wider hardware support for Direct3D 12 on x86 Windows desktops.
+  //   Direct3D 12 requires the minimum of Nvidia Fermi, or, with a pre-2021
+  //   driver version, Intel HD Graphics 4200. Vulkan, however, is supported
+  //   only starting with Nvidia Kepler and a much more recent Intel UHD
+  //   Graphics generation.
+  // - Wider hardware support on other kinds of Microsoft devices. The Xbox One
+  //   and the Xbox Series X|S only support Direct3D as the GPU API in their UWP
+  //   runtime, and only version 12 can be granted expanded resource access.
+  //   Qualcomm, as of June 2022, also doesn't provide a Vulkan implementation
+  //   for their Arm-based Windows devices, while Direct3D 12 is available.
+  //   - Both older Intel GPUs and the Xbox One apparently, as well as earlier
+  //     Windows 10 versions, also require Shader Model 5.1 DXBC shaders rather
+  //     than Shader Model 6 DXIL ones, so a DXBC shader translator should be
+  //     available in Xenia too, a DXIL one doesn't fully replace it.
+  // - As of June 2022, AMD also refuses to implement the
+  //   VK_EXT_fragment_shader_interlock Vulkan extension in their drivers, as
+  //   well as its OpenGL counterpart, which is heavily utilized for accurate
+  //   support of Xenos render target formats that don't have PC equivalents
+  //   (8_8_8_8_GAMMA, 2_10_10_10_FLOAT, 16_16 and 16_16_16_16 with -32 to 32
+  //   range, D24FS8) with correct blending. Direct3D 12, however, requires
+  //   support for similar functionality (rasterizer-ordered views) on the
+  //   feature level 12_1, and the AMD driver implements it on Direct3D, as well
+  //   as raster order groups in their Metal driver.
+  //
+  // Additionally, different host GPU APIs receive feature support at different
+  // paces. VK_EXT_fragment_shader_interlock first appeared in 2019, for
+  // instance, while Xenia had been taking advantage of rasterizer-ordered views
+  // on Direct3D 12 for over half a year at that point (they have existed in
+  // Direct3D 12 since the first version).
+  //
+  // MoltenVK on top Metal also has its flaws and limitations. Metal, for
+  // instance, as of June 2022, doesn't provide a switch for primitive restart,
+  // while Vulkan does - so MoltenVK is not completely transparent to Xenia,
+  // many of its issues that may be not very obvious (unlike when the Metal API
+  // is used directly) should be taken into account in Xenia. Also, as of June
+  // 2022, MoltenVK translates SPIR-V shaders into the C++-based Metal Shading
+  // Language rather than AIR directly, which likely massively increases
+  // pipeline object creation time - and Xenia translates shaders and creates
+  // pipelines when they're first actually used for a draw command by the game,
+  // thus it can't precompile anything that hasn't ever been encountered before
+  // there's already no time to waste.
+  //
+  // Very old hardware (Direct3D 10 level) is also not supported by most Vulkan
+  // drivers. However, in the future, Xenia may be ported to it using the
+  // Direct3D 11 API with the feature level 10_1 or 10_0. OpenGL, however, had
+  // been lagging behind Direct3D prior to versions 4.x, and didn't receive
+  // compute shaders until a 4.2 extension (while 4.2 already corresponds
+  // roughly to Direct3D 11 features) - and replacing Xenia compute shaders with
+  // transform feedback / stream output is not always trivial (in particular,
+  // will need to rely on GL_ARB_transform_feedback3 for skipping over memory
+  // locations that shouldn't be overwritten).
+  //
+  // For maintainability, as much implementation code as possible should be
+  // placed in `xe::gpu` and shared between the backends rather than duplicated
+  // between them.
   Factory<gpu::GraphicsSystem> factory;
 #if XE_PLATFORM_WIN32
   factory.Add<gpu::d3d12::D3D12GraphicsSystem>("d3d12");
@@ -252,9 +349,10 @@ std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
     ui::Window* window) {
   std::vector<std::unique_ptr<hid::InputDriver>> drivers;
   if (cvars::hid.compare("nop") == 0) {
-    drivers.emplace_back(xe::hid::nop::Create(window));
+    drivers.emplace_back(
+        xe::hid::nop::Create(window, EmulatorWindow::kZOrderHidInput));
   } else {
-    Factory<hid::InputDriver, ui::Window*> factory;
+    Factory<hid::InputDriver, ui::Window*, size_t> factory;
 #if XE_PLATFORM_WIN32
     // WinKey input driver should always be the last input driver added!
     factory.Add("winkey", xe::hid::winkey::Create);
@@ -262,21 +360,28 @@ std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
 #if XE_PLATFORM_WIN32
     factory.Add("xinput", xe::hid::xinput::Create);
 #endif  // XE_PLATFORM_WIN32
+#if !XE_PLATFORM_ANDROID
     factory.Add("sdl", xe::hid::sdl::Create);
-    for (auto& driver : factory.CreateAll(cvars::hid, window)) {
+#endif  // !XE_PLATFORM_ANDROID
+    for (auto& driver : factory.CreateAll(cvars::hid, window,
+                                          EmulatorWindow::kZOrderHidInput)) {
       if (XSUCCEEDED(driver->Setup())) {
         drivers.emplace_back(std::move(driver));
       }
     }
     if (drivers.empty()) {
       // Fallback to nop if none created.
-      drivers.emplace_back(xe::hid::nop::Create(window));
+      drivers.emplace_back(
+          xe::hid::nop::Create(window, EmulatorWindow::kZOrderHidInput));
     }
   }
   return drivers;
 }
 
 bool EmulatorApp::OnInitialize() {
+#if XE_ARCH_AMD64 == 1
+  amd64::InitFeatureFlags();
+#endif
   Profiler::Initialize();
   Profiler::ThreadEnter("Main");
 
@@ -349,6 +454,7 @@ bool EmulatorApp::OnInitialize() {
   // Setup the emulator and run its loop in a separate thread.
   emulator_thread_quit_requested_.store(false, std::memory_order_relaxed);
   emulator_thread_event_ = xe::threading::Event::CreateAutoResetEvent(false);
+  assert_not_null(emulator_thread_event_);
   emulator_thread_ = std::thread(&EmulatorApp::EmulatorThread, this);
 
   return true;
@@ -365,6 +471,9 @@ void EmulatorApp::OnDestroy() {
   // The profiler needs to shut down before the graphics context.
   Profiler::Shutdown();
 
+  // Write all cvar overrides to the config.
+  config::SaveConfig();
+
   // TODO(DrChat): Remove this code and do a proper exit.
   XELOGI("Cheap-skate exit!");
   std::quick_exit(EXIT_SUCCESS);
@@ -378,14 +487,17 @@ void EmulatorApp::EmulatorThread() {
 
   // Setup and initialize all subsystems. If we can't do something
   // (unsupported system, memory issues, etc) this will fail early.
-  X_STATUS result =
-      emulator_->Setup(emulator_window_->window(), CreateAudioSystem,
-                       CreateGraphicsSystem, CreateInputDrivers);
+  X_STATUS result = emulator_->Setup(
+      emulator_window_->window(), emulator_window_->imgui_drawer(), true,
+      CreateAudioSystem, CreateGraphicsSystem, CreateInputDrivers);
   if (XFAILED(result)) {
     XELOGE("Failed to setup emulator: {:08X}", result);
     app_context().RequestDeferredQuit();
     return;
   }
+
+  app_context().CallInUIThread(
+      [this]() { emulator_window_->SetupGraphicsSystemPresenterPainting(); });
 
   if (cvars::mount_scratch) {
     auto scratch_device = std::make_unique<xe::vfs::HostPathDevice>(
@@ -455,12 +567,8 @@ void EmulatorApp::EmulatorThread() {
           app_context().CallInUIThreadSynchronous([this]() {
             debug_window_ = xe::debug::ui::DebugWindow::Create(emulator_.get(),
                                                                app_context());
-            debug_window_->window()->on_closed.AddListener(
-                [this](xe::ui::UIEvent* e) {
-                  emulator_->processor()->set_debug_listener(nullptr);
-                  app_context().CallInUIThread(
-                      [this]() { debug_window_.reset(); });
-                });
+            debug_window_->window()->AddListener(
+                &debug_window_closed_listener_);
           });
           // If failed to enqueue the UI thread call, this will just be null.
           return debug_window_.get();
@@ -483,15 +591,19 @@ void EmulatorApp::EmulatorThread() {
         });
       });
 
+  emulator_->on_patch_apply.AddListener([this]() {
+    app_context().CallInUIThread([this]() { emulator_window_->UpdateTitle(); });
+  });
+
   emulator_->on_terminate.AddListener([]() {
     if (cvars::discord) {
       discord::DiscordPresence::NotPlaying();
     }
   });
 
-  // Enable the main menu now that the emulator is properly loaded
+  // Enable emulator input now that the emulator is properly loaded.
   app_context().CallInUIThread(
-      [this]() { emulator_window_->window()->EnableMainMenu(); });
+      [this]() { emulator_window_->OnEmulatorInitialized(); });
 
   // Grab path from the flag or unnamed argument.
   std::filesystem::path path;
@@ -499,16 +611,11 @@ void EmulatorApp::EmulatorThread() {
     path = cvars::target;
   }
 
-  // Toggles fullscreen
-  if (cvars::fullscreen) {
-    app_context().CallInUIThread(
-        [this]() { emulator_window_->ToggleFullscreen(); });
-  }
-
   if (!path.empty()) {
     // Normalize the path and make absolute.
     auto abs_path = std::filesystem::absolute(path);
-    result = emulator_->LaunchPath(abs_path);
+
+    result = app_context().CallInUIThread([this, abs_path]() { return emulator_->LaunchPath(abs_path); });
     if (XFAILED(result)) {
       xe::FatalError(fmt::format("Failed to launch target: {:08X}", result));
       app_context().RequestDeferredQuit();

@@ -12,6 +12,7 @@
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/string.h"
 #include "xenia/kernel/xfile.h"
 #include "xenia/vfs/devices/null_entry.h"
 
@@ -20,7 +21,7 @@ namespace vfs {
 
 NullDevice::NullDevice(const std::string& mount_path,
                        const std::initializer_list<std::string>& null_paths)
-    : Device(mount_path), null_paths_(null_paths), name_("NullDevice") {}
+    : Device(mount_path), name_("NullDevice"), null_paths_(null_paths) {}
 
 NullDevice::~NullDevice() = default;
 
@@ -50,7 +51,7 @@ Entry* NullDevice::ResolvePath(const std::string_view path) {
   }
 
   for (auto& child : root->children()) {
-    if (!strcasecmp(child->path().c_str(), path.data())) {
+    if (!xe_strcasecmp(child->path().c_str(), path.data())) {
       return child.get();
     }
   }

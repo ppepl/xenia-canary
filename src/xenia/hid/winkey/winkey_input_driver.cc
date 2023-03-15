@@ -2,19 +2,21 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2014 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #include "xenia/hid/winkey/winkey_input_driver.h"
 
+#include "xenia/base/logging.h"
 #include "xenia/base/platform_win.h"
 #include "xenia/hid/hid_flags.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_win.h"
+#include "xenia/ui/virtual_key.h"
 
 #include "xenia/hid/winkey/hookables/goldeneye.h"
 #include "xenia/hid/winkey/hookables/halo3.h"
@@ -214,9 +216,30 @@ int ParseButtonCombination(const char* combo) {
   return retval;
 }
 
+#define XE_HID_WINKEY_BINDING(button, description, cvar_name, \
+                              cvar_default_value)             \
+  DEFINE_string(cvar_name, cvar_default_value,                \
+                "List of keys to bind to " description        \
+                ", separated by spaces",                      \
+                "HID.WinKey")
+#include "winkey_binding_table.inc"
+#undef XE_HID_WINKEY_BINDING
+
 namespace xe {
 namespace hid {
 namespace winkey {
+
+bool __inline IsKeyToggled(uint8_t key) {
+  return (GetKeyState(key) & 0x1) == 0x1;
+}
+
+bool __inline IsKeyDown(uint8_t key) {
+  return (GetAsyncKeyState(key) & 0x8000) == 0x8000;
+}
+
+bool __inline IsKeyDown(ui::VirtualKey virtual_key) {
+  return IsKeyDown(static_cast<uint8_t>(virtual_key));
+}
 
 WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
     : InputDriver(window), packet_number_(1) {
@@ -367,7 +390,6 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
     if (!is_active()) {
       return;
     }
-
     auto global_lock = global_critical_region_.Acquire();
 
     KeyEvent key;
@@ -381,7 +403,6 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
     if (!is_active()) {
       return;
     }
-
     auto global_lock = global_critical_region_.Acquire();
 
     KeyEvent key;
@@ -393,7 +414,22 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
   });
 }
 
-WinKeyInputDriver::~WinKeyInputDriver() = default;
+WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window,
+                                     size_t window_z_order)
+    : InputDriver(window, window_z_order), window_input_listener_(*this) {
+#define XE_HID_WINKEY_BINDING(button, description, cvar_name,          \
+                              cvar_default_value)                      \
+  ParseKeyBinding(xe::ui::VirtualKey::kXInputPad##button, description, \
+                  cvars::cvar_name);
+#include "winkey_binding_table.inc"
+#undef XE_HID_WINKEY_BINDING
+
+  window->AddInputListener(&window_input_listener_, window_z_order);
+}
+
+WinKeyInputDriver::~WinKeyInputDriver() {
+  window()->RemoveInputListener(&window_input_listener_);
+}
 
 X_STATUS WinKeyInputDriver::Setup() { return X_STATUS_SUCCESS; }
 
@@ -436,7 +472,7 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
   int16_t thumb_ly = 0;
   int16_t thumb_rx = 0;
   int16_t thumb_ry = 0;
-  bool modifier_pressed = false;
+bool modifier_pressed = false;
 
   X_RESULT result = X_ERROR_SUCCESS;
 
@@ -545,7 +581,7 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
   out_state->gamepad.thumb_rx = thumb_rx;
   out_state->gamepad.thumb_ry = thumb_ry;
 
-  // Check if we have any hooks/injections for the current game
+    // Check if we have any hooks/injections for the current game
   bool game_modifier_handled = false;
   for (auto& game : hookable_games_) {
     if (game->IsGameSupported()) {
@@ -681,7 +717,6 @@ X_RESULT WinKeyInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
   if (evt.vkey == (0x33)) {
     // 3
     virtual_key = 0x5804;  // VK_PAD_RSHOULDER
-  }
 
   if (virtual_key != 0) {
     if (evt.transition == true) {
@@ -707,6 +742,29 @@ X_RESULT WinKeyInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
   // X_ERROR_DEVICE_NOT_CONNECTED if no device
   // X_ERROR_SUCCESS if key
   return result;
+}
+
+void WinKeyInputDriver::WinKeyWindowInputListener::OnKeyDown(ui::KeyEvent& e) {
+  driver_.OnKey(e, true);
+}
+
+void WinKeyInputDriver::WinKeyWindowInputListener::OnKeyUp(ui::KeyEvent& e) {
+  driver_.OnKey(e, false);
+}
+
+void WinKeyInputDriver::OnKey(ui::KeyEvent& e, bool is_down) {
+  if (!is_active()) {
+    return;
+  }
+
+  KeyEvent key;
+  key.virtual_key = e.virtual_key();
+  key.transition = is_down;
+  key.prev_state = e.prev_state();
+  key.repeat_count = e.repeat_count();
+
+  auto global_lock = global_critical_region_.Acquire();
+  key_events_.push(key);
 }
 
 }  // namespace winkey

@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2015 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -30,7 +30,6 @@ enum class TracePlaybackMode {
 class TracePlayer : public TraceReader {
  public:
   TracePlayer(GraphicsSystem* graphics_system);
-  ~TracePlayer() override;
 
   GraphicsSystem* graphics_system() const { return graphics_system_; }
   int current_frame_index() const { return current_frame_index_; }
@@ -59,7 +58,6 @@ class TracePlayer : public TraceReader {
   bool playing_trace_ = false;
   std::atomic<uint32_t> playback_percent_ = {0};
   std::unique_ptr<xe::threading::Event> playback_event_;
-  uint8_t* edram_snapshot_ = nullptr;
 };
 
 }  // namespace gpu

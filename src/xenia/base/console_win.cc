@@ -19,7 +19,7 @@ namespace xe {
 
 // TODO(Triang3l): Set the default depending on the actual subsystem. Currently
 // it inhibits message boxes.
-static bool has_console_attached_ = true;
+static bool has_console_attached_ = false;
 
 bool has_console_attached() { return has_console_attached_; }
 
@@ -27,7 +27,7 @@ static bool has_shell_environment_variable() {
   size_t size = 0;
   // Check if SHELL exists
   // If it doesn't, then we are in a Windows Terminal
-  auto error = getenv_s(&size, nullptr, 0, "SHELL");
+  auto error = _wgetenv_s(&size, nullptr, 0, L"SHELL");
   if (error) {
     return false;
   }
@@ -35,13 +35,15 @@ static bool has_shell_environment_variable() {
 }
 
 void AttachConsole() {
-  bool has_console = ::AttachConsole(ATTACH_PARENT_PROCESS) == TRUE;
+  
+bool has_console = ::AttachConsole(ATTACH_PARENT_PROCESS) == TRUE;
+#if 0
   if (!has_console || !has_shell_environment_variable()) {
     // We weren't launched from a console, so just return.
     has_console_attached_ = false;
     return;
   }
-
+  #endif
   AllocConsole();
 
   has_console_attached_ = true;

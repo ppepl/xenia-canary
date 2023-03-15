@@ -17,7 +17,7 @@ project("xenia-hid")
 group("demos")
 project("xenia-hid-demo")
   uuid("a56a209c-16d5-4913-85f9-86976fe7fddf")
-  kind("WindowedApp")
+  single_library_windowed_app_kind()
   language("C++")
   links({
     "fmt",
@@ -29,7 +29,10 @@ project("xenia-hid-demo")
     "xenia-hid-nop",
     "xenia-hid-sdl",
     "xenia-ui",
-    "xenia-ui-vulkan",
+	"xenia-ui-vulkan",
+  })
+  includedirs({
+    project_root.."/third_party/Vulkan-Headers/include",
   })
   files({
     "hid_demo.cc",
@@ -38,11 +41,20 @@ project("xenia-hid-demo")
   resincludedirs({
     project_root,
   })
+  filter({"configurations:Release", "platforms:Windows"})
+    buildoptions({
+      "/Os",
+      "/O1"
+    })
+  filter("platforms:not Android-*")
+    links({
+      "xenia-helper-sdl",
+      "xenia-hid-sdl",
+    })
 
   filter("platforms:Linux")
     links({
       "SDL2",
-      "vulkan",
       "X11",
       "xcb",
       "X11-xcb",

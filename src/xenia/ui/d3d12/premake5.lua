@@ -10,6 +10,12 @@ project("xenia-ui-d3d12")
     "xenia-base",
     "xenia-ui",
   })
+  filter({"configurations:Release", "platforms:Windows"})
+    buildoptions({
+      "/Os",
+      "/O1"
+    })
+  filter {}
   local_platform_files()
   files({
     "../shaders/bytecode/d3d12_5_1/*.h",
@@ -18,7 +24,7 @@ project("xenia-ui-d3d12")
 group("demos")
 project("xenia-ui-window-d3d12-demo")
   uuid("3b9686a7-0f04-4e17-8b00-aeb78ae1107c")
-  kind("WindowedApp")
+  single_library_windowed_app_kind()
   language("C++")
   links({
     "fmt",

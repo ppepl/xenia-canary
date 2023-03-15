@@ -20,34 +20,57 @@ namespace apu {
 namespace conversion {
 
 #if XE_ARCH_AMD64
-inline void sequential_6_BE_to_interleaved_6_LE(float* output,
-                                                const float* input,
-                                                size_t ch_sample_count) {
-  const uint32_t* in = reinterpret_cast<const uint32_t*>(input);
-  uint32_t* out = reinterpret_cast<uint32_t*>(output);
-  const __m128i byte_swap_shuffle =
-      _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);
-  for (size_t sample = 0; sample < ch_sample_count; sample++) {
-    __m128i sample0 = _mm_set_epi32(
-        in[3 * ch_sample_count + sample], in[2 * ch_sample_count + sample],
-        in[1 * ch_sample_count + sample], in[0 * ch_sample_count + sample]);
-    uint32_t sample1 = in[4 * ch_sample_count + sample];
-    uint32_t sample2 = in[5 * ch_sample_count + sample];
-    sample0 = _mm_shuffle_epi8(sample0, byte_swap_shuffle);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(&out[sample * 6]), sample0);
-    sample1 = xe::byte_swap(sample1);
-    out[sample * 6 + 4] = sample1;
-    sample2 = xe::byte_swap(sample2);
-    out[sample * 6 + 5] = sample2;
+
+
+XE_NOINLINE
+static void _generic_sequential_6_BE_to_interleaved_6_LE(
+    float* XE_RESTRICT output, const float* XE_RESTRICT input,
+    unsigned ch_sample_count) {
+  for (unsigned sample = 0; sample < ch_sample_count; sample++) {
+    for (unsigned channel = 0; channel < 6; channel++) {
+      unsigned int value = *reinterpret_cast<const unsigned int*>(
+          &input[channel * ch_sample_count + sample]);
+
+      *reinterpret_cast<unsigned int*>(&output[sample * 6 + channel]) =
+          xe::byte_swap(value);
+    }
   }
 }
+#if XE_COMPILER_CLANG_CL != 1
+// load_be_u32 unavailable on clang-cl
+XE_NOINLINE
+static void _movbe_sequential_6_BE_to_interleaved_6_LE(
+    float* XE_RESTRICT output, const float* XE_RESTRICT input,
+    unsigned ch_sample_count) {
+  for (unsigned sample = 0; sample < ch_sample_count; sample++) {
+    for (unsigned channel = 0; channel < 6; channel++) {
+      *reinterpret_cast<unsigned int*>(&output[sample * 6 + channel]) =
+          _load_be_u32(reinterpret_cast<const unsigned int*>(
+              &input[channel * ch_sample_count + sample]));
+    }
+  }
+}
+
+inline static void sequential_6_BE_to_interleaved_6_LE(
+    float* output, const float* input, unsigned ch_sample_count) {
+  if (amd64::GetFeatureFlags() & amd64::kX64EmitMovbe) {
+    _movbe_sequential_6_BE_to_interleaved_6_LE(output, input, ch_sample_count);
+  } else {
+    _generic_sequential_6_BE_to_interleaved_6_LE(output, input,
+                                                 ch_sample_count);
+  }
+}
+#else
+inline static void sequential_6_BE_to_interleaved_6_LE(
+    float* output, const float* input, unsigned ch_sample_count) {
+  _generic_sequential_6_BE_to_interleaved_6_LE(output, input, ch_sample_count);
+}
+#endif
 
 inline void sequential_6_BE_to_interleaved_2_LE(float* output,
                                                 const float* input,
                                                 size_t ch_sample_count) {
   assert_true(ch_sample_count % 4 == 0);
-  const uint32_t* in = reinterpret_cast<const uint32_t*>(input);
-  uint32_t* out = reinterpret_cast<uint32_t*>(output);
   const __m128i byte_swap_shuffle =
       _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);
   const __m128 half = _mm_set1_ps(0.5f);

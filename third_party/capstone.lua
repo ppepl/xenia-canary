@@ -11,6 +11,13 @@ project("capstone")
     "CAPSTONE_USE_SYS_DYN_MEM",
     "_LIB",
   })
+  filter({"configurations:Release", "platforms:Windows"})
+	buildoptions({
+		"/Os",
+		"/O1"
+	})
+  filter {}
+
   includedirs({
     "capstone",
     "capstone/include",

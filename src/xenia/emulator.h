@@ -10,15 +10,19 @@
 #ifndef XENIA_EMULATOR_H_
 #define XENIA_EMULATOR_H_
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "xenia/base/delegate.h"
 #include "xenia/base/exception_handler.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/memory.h"
 #include "xenia/patcher/patcher.h"
+#include "xenia/vfs/device.h"
 #include "xenia/vfs/virtual_file_system.h"
 #include "xenia/xbox.h"
 
@@ -39,6 +43,7 @@ class InputDriver;
 class InputSystem;
 }  // namespace hid
 namespace ui {
+class ImGuiDrawer;
 class Window;
 }  // namespace ui
 }  // namespace xe
@@ -51,6 +56,37 @@ constexpr fourcc_t kEmulatorSaveSignature = make_fourcc("XSAV");
 // This is responsible for initializing and managing all the various subsystems.
 class Emulator {
  public:
+  // This is the class for the top-level callbacks. They may be called in an
+  // undefined order, so among them there must be no dependencies on each other,
+  // especially hierarchical ones. If hierarchical handling is needed, for
+  // instance, if a specific implementation of a subsystem needs to handle
+  // changes, but the entire implementation must be reloaded, the implementation
+  // in this example _must not_ register / unregister its own callback - rather,
+  // the proper ordering and hierarchy should be constructed in a single
+  // callback (in this example, for the whole subsystem).
+  //
+  // All callbacks must be created and destroyed in the UI thread only (or the
+  // thread that takes its place in the architecture of the specific app if
+  // there's no UI), as they are invoked in the UI thread.
+  class GameConfigLoadCallback {
+   public:
+    GameConfigLoadCallback(Emulator& emulator);
+    GameConfigLoadCallback(const GameConfigLoadCallback& callback) = delete;
+    GameConfigLoadCallback& operator=(const GameConfigLoadCallback& callback) =
+        delete;
+    virtual ~GameConfigLoadCallback();
+
+    // The callback is invoked in the UI thread (or the thread that takes its
+    // place in the architecture of the specific app if there's no UI).
+    virtual void PostGameConfigLoad() = 0;
+
+   protected:
+    Emulator& emulator() const { return emulator_; }
+
+   private:
+    Emulator& emulator_;
+  };
+
   explicit Emulator(const std::filesystem::path& command_line,
                     const std::filesystem::path& storage_root,
                     const std::filesystem::path& content_root,
@@ -74,7 +110,7 @@ class Emulator {
 
   // Version of the title as a string.
   const std::string& title_version() const { return title_version_; }
-
+  
   // Host path of the executable being ran
   const std::filesystem::path& executable_path() const {
     return executable_path_;
@@ -88,8 +124,12 @@ class Emulator {
   // Are we currently running a title?
   bool is_title_open() const { return title_id_.has_value(); }
 
-  // Window used for displaying graphical output.
+  // Window used for displaying graphical output. Can be null.
   ui::Window* display_window() const { return display_window_; }
+
+  // ImGui drawer for various kinds of dialogs requested by the guest. Can be
+  // null.
+  ui::ImGuiDrawer* imgui_drawer() const { return imgui_drawer_; }
 
   // Guest memory system modelling the RAM (both virtual and physical) of the
   // system.
@@ -121,9 +161,7 @@ class Emulator {
   // This is effectively the guest operating system.
   kernel::KernelState* kernel_state() const { return kernel_state_.get(); }
 
-  patcher::PatchingSystem* patching_system() const {
-    return patching_system_.get();
-  }
+  patcher::Patcher* patcher() const { return patcher_.get(); }
 
   // Initializes the emulator and configures all components.
   // The given window is used for display and the provided functions are used
@@ -131,7 +169,8 @@ class Emulator {
   // Once this function returns a game can be launched using one of the Launch
   // functions.
   X_STATUS Setup(
-      ui::Window* display_window,
+      ui::Window* display_window, ui::ImGuiDrawer* imgui_drawer,
+      bool require_cpu_backend,
       std::function<std::unique_ptr<apu::AudioSystem>(cpu::Processor*)>
           audio_system_factory,
       std::function<std::unique_ptr<gpu::GraphicsSystem>()>
@@ -142,6 +181,11 @@ class Emulator {
   // Terminates the currently running title.
   X_STATUS TerminateTitle();
 
+const std::unique_ptr<vfs::Device> CreateVfsDeviceBasedOnPath(
+      const std::filesystem::path& path, const std::string_view mount_path);
+
+  X_STATUS MountPath(const std::filesystem::path& path,
+                     const std::string_view mount_path);
   // Launches a game from the given file path.
   // This will attempt to infer the type of the given file (such as an iso, etc)
   // using heuristics.
@@ -157,6 +201,9 @@ class Emulator {
   // Launches a game from an STFS container file.
   X_STATUS LaunchStfsContainer(const std::filesystem::path& path);
 
+  // Extract content of package to content specific directory.
+  X_STATUS InstallContentPackage(const std::filesystem::path& path);
+
   void Pause();
   void Resume();
   bool is_paused() const { return paused_; }
@@ -167,18 +214,23 @@ class Emulator {
   // The game can request another title to be loaded.
   bool TitleRequested();
   void LaunchNextTitle();
+  const std::filesystem::path GetNewDiscPath(std::string window_message = "");
 
   void WaitUntilExit();
 
  public:
   xe::Delegate<uint32_t, const std::string_view> on_launch;
   xe::Delegate<bool> on_shader_storage_initialization;
+  xe::Delegate<> on_patch_apply;
   xe::Delegate<> on_terminate;
   xe::Delegate<> on_exit;
 
  private:
   static bool ExceptionCallbackThunk(Exception* ex, void* data);
   bool ExceptionCallback(Exception* ex);
+
+  void AddGameConfigLoadCallback(GameConfigLoadCallback* callback);
+  void RemoveGameConfigLoadCallback(GameConfigLoadCallback* callback);
 
   std::string FindLaunchModule();
 
@@ -194,7 +246,8 @@ class Emulator {
   std::string title_name_;
   std::string title_version_;
 
-  ui::Window* display_window_;
+  ui::Window* display_window_ = nullptr;
+  ui::ImGuiDrawer* imgui_drawer_ = nullptr;
 
   std::unique_ptr<Memory> memory_;
 
@@ -205,9 +258,19 @@ class Emulator {
 
   std::unique_ptr<cpu::ExportResolver> export_resolver_;
   std::unique_ptr<vfs::VirtualFileSystem> file_system_;
-  std::unique_ptr<patcher::PatchingSystem> patching_system_;
+  std::unique_ptr<patcher::Patcher> patcher_;
 
   std::unique_ptr<kernel::KernelState> kernel_state_;
+
+  // Accessible only from the thread that invokes those callbacks (the UI thread
+  // if the UI is available).
+  std::vector<GameConfigLoadCallback*> game_config_load_callbacks_;
+  // Using an index, not an iterator, because after the erasure, the adjustment
+  // must be done for the vector element indices that would be in the iterator
+  // range that would be invalidated.
+  // SIZE_MAX if not currently in the game config load callback loop.
+  size_t game_config_load_callback_loop_next_index_ = SIZE_MAX;
+
   kernel::object_ref<kernel::XThread> main_thread_;
   std::optional<uint32_t> title_id_;  // Currently running title ID
 

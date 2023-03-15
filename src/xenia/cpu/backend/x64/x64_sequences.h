@@ -10,9 +10,13 @@
 #ifndef XENIA_CPU_BACKEND_X64_X64_SEQUENCES_H_
 #define XENIA_CPU_BACKEND_X64_X64_SEQUENCES_H_
 
+#include "xenia/base/logging.h"
 #include "xenia/cpu/hir/instr.h"
 
 #include <unordered_map>
+#define assert_impossible_sequence(name)          \
+  assert_always("impossible sequence hit" #name); \
+  XELOGE("impossible sequence hit: {}", #name)
 
 namespace xe {
 namespace cpu {
@@ -21,7 +25,7 @@ namespace x64 {
 
 class X64Emitter;
 
-typedef bool (*SequenceSelectFn)(X64Emitter&, const hir::Instr*);
+typedef bool (*SequenceSelectFn)(X64Emitter&, const hir::Instr*, uint32_t ikey);
 extern std::unordered_map<uint32_t, SequenceSelectFn> sequence_table;
 
 template <typename T>

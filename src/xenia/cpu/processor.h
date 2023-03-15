@@ -101,6 +101,7 @@ class Processor {
   }
 
   bool AddModule(std::unique_ptr<Module> module);
+  void RemoveModule(const std::string_view name);
   Module* GetModule(const std::string_view name);
   std::vector<Module*> GetModules();
 
@@ -111,8 +112,10 @@ class Processor {
 
   Function* QueryFunction(uint32_t address);
   std::vector<Function*> FindFunctionsWithAddress(uint32_t address);
+  void RemoveFunctionByAddress(uint32_t address);
 
   Function* LookupFunction(uint32_t address);
+  Module* LookupModule(uint32_t address);
   Function* LookupFunction(Module* module, uint32_t address);
   Function* ResolveFunction(uint32_t address);
 
@@ -213,8 +216,9 @@ class Processor {
   // Updates all cached thread execution info (state, call stacks, etc).
   // The given override thread handle and context will be used in place of
   // sampled values for that thread.
-  void UpdateThreadExecutionStates(uint32_t override_handle = 0,
-                                   X64Context* override_context = nullptr);
+  void UpdateThreadExecutionStates(
+      uint32_t override_handle = 0,
+      HostThreadContext* override_context = nullptr);
 
   // Suspends all breakpoints, uninstalling them as required.
   // No breakpoints will be triggered until they are resumed.

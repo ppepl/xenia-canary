@@ -14,8 +14,8 @@
 #include <mutex>
 #include <string>
 
+#include "xenia/base/mutex.h"
 #include "xenia/base/vec128.h"
-
 namespace xe {
 namespace cpu {
 class Processor;
@@ -246,30 +246,7 @@ enum class PPCRegister {
 };
 
 #pragma pack(push, 8)
-typedef struct PPCContext_s {
-  // Must be stored at 0x0 for now.
-  // TODO(benvanik): find a nice way to describe this to the JIT.
-  ThreadState* thread_state;  // 0x0
-  // TODO(benvanik): this is getting nasty. Must be here.
-  uint8_t* virtual_membase;  // 0x8
-
-  // Most frequently used registers first.
-  uint64_t lr;      // 0x10 Link register
-  uint64_t ctr;     // 0x18 Count register
-  uint64_t r[32];   // 0x20 General purpose registers
-  double f[32];     // 0x120 Floating-point registers
-  vec128_t v[128];  // 0x220 VMX128 vector registers
-
-  // XER register:
-  // Split to make it easier to do individual updates.
-  uint8_t xer_ca;  // 0xA20
-  uint8_t xer_ov;  // 0xA21
-  uint8_t xer_so;  // 0xA22
-
-  // Condition registers:
-  // These are split to make it easier to do DCE on unused stores.
-  uint64_t cr() const;
-  void set_cr(uint64_t value);
+typedef struct alignas(64) PPCContext_s {
   union {
     uint32_t value;
     struct {
@@ -395,7 +372,31 @@ typedef struct PPCContext_s {
     } bits;
   } fpscr;  // Floating-point status and control register
 
+  // Most frequently used registers first.
+
+  uint64_t r[32];   // 0x20 General purpose registers
+  uint64_t ctr;     // 0x18 Count register
+  uint64_t lr;      // 0x10 Link register
+
+  uint64_t msr;		//machine state register
+
+  double f[32];     // 0x120 Floating-point registers
+  vec128_t v[128];  // 0x220 VMX128 vector registers
+  vec128_t vscr_vec;
+  // XER register:
+  // Split to make it easier to do individual updates.
+  uint8_t xer_ca;
+  uint8_t xer_ov;
+  uint8_t xer_so;
+
+  // Condition registers:
+  // These are split to make it easier to do DCE on unused stores.
+  uint64_t cr() const;
+  void set_cr(uint64_t value);
+  // todo: remove, saturation should be represented by a vector
   uint8_t vscr_sat;
+
+  uint32_t vrsave;
 
   // uint32_t get_fprf() {
   //   return fpscr.value & 0x000F8000;
@@ -409,7 +410,7 @@ typedef struct PPCContext_s {
 
   // Global interrupt lock, held while interrupts are disabled or interrupts are
   // executing. This is shared among all threads and comes from the processor.
-  std::recursive_mutex* global_mutex;
+  global_mutex_type* global_mutex;
 
   // Used to shuttle data into externs. Contents volatile.
   uint64_t scratch;
@@ -425,6 +426,28 @@ typedef struct PPCContext_s {
 
   // Value of last reserved load
   uint64_t reserved_val;
+  ThreadState* thread_state;
+  uint8_t* virtual_membase;
+
+  template <typename T = uint8_t*>
+  inline T TranslateVirtual(uint32_t guest_address) XE_RESTRICT const {
+#if XE_PLATFORM_WIN32 == 1
+    uint8_t* host_address = virtual_membase + guest_address;
+    if (guest_address >= static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this))) {
+      host_address += 0x1000;
+    }
+    return reinterpret_cast<T>(host_address);
+#else
+    return processor->memory()->TranslateVirtual<T>(guest_address);
+
+#endif
+  }
+  //for convenience in kernel functions, version that auto narrows to uint32
+  template <typename T = uint8_t*>
+  inline T TranslateVirtualGPR(uint64_t guest_address) XE_RESTRICT const {
+    return TranslateVirtual<T>(static_cast<uint32_t>(guest_address));
+  
+  }
 
   static std::string GetRegisterName(PPCRegister reg);
   std::string GetStringFromValue(PPCRegister reg) const;
@@ -435,6 +458,7 @@ typedef struct PPCContext_s {
                             std::string& result) const;
 } PPCContext;
 #pragma pack(pop)
+constexpr size_t ppcctx_size = sizeof(PPCContext);
 static_assert(sizeof(PPCContext) % 64 == 0, "64b padded");
 
 }  // namespace ppc

@@ -57,7 +57,24 @@ inline size_t GetTypeSize(TypeName type_name) {
       return 0;
   }
 }
+inline uint64_t GetScalarTypeMask(TypeName type_name) {
+  size_t mask_width = GetTypeSize(type_name);
 
+  if (mask_width == 8) {
+    return ~0ULL;
+  } else {
+    return (1ULL << (mask_width * CHAR_BIT)) - 1;
+  }
+}
+static inline uint64_t GetScalarSignbitMask(TypeName type_name) {
+  size_t type_width = GetTypeSize(type_name);
+
+  return 1ULL << ((type_width * CHAR_BIT) - 1);
+}
+
+static inline bool IsScalarIntegralType(TypeName type_name) {
+  return type_name < FLOAT32_TYPE && type_name >= INT8_TYPE;
+}
 enum ValueFlags {
   VALUE_IS_CONSTANT = (1 << 1),
   VALUE_IS_ALLOCATED = (1 << 2),  // Used by backends. Do not set.
@@ -68,8 +85,28 @@ struct RegAssignment {
   int32_t index;
 };
 
+struct ValueMask {
+  uint64_t low;   // low 64 bits, usually for scalar values
+  uint64_t high;  // high 64 bits, only used for vector types
+
+  ValueMask(uint64_t _low, uint64_t _high) : low(_low), high(_high) {}
+
+  ValueMask operator&(ValueMask other) const {
+    return ValueMask{low & other.low, high & other.high};
+  }
+  ValueMask operator|(ValueMask other) const {
+    return ValueMask{low | other.low, high | other.high};
+  }
+  ValueMask operator^(ValueMask other) const {
+    return ValueMask{low ^ other.low, high ^ other.high};
+  }
+};
+
 class Value {
  public:
+  /*
+    todo : this should be intrusive and be part of Instr instead.
+  */
   typedef struct Use_s {
     Instr* instr;
     Use_s* prev;
@@ -94,17 +131,16 @@ class Value {
   TypeName type;
 
   uint32_t flags;
-  RegAssignment reg;
-  ConstantValue constant;
 
   Instr* def;
   Use* use_head;
   // NOTE: for performance reasons this is not maintained during construction.
   Instr* last_use;
-  Value* local_slot;
-
-  // TODO(benvanik): remove to shrink size.
-  void* tag;
+  RegAssignment reg;
+  union {
+    Value* local_slot;
+    ConstantValue constant;
+  };
 
   Use* AddUse(Arena* arena, Instr* instr);
   void RemoveUse(Use* use);
@@ -175,8 +211,30 @@ class Value {
     flags = other->flags;
     constant.v128 = other->constant.v128;
   }
+  bool HasLocalSlot() const {
+    return !(flags & VALUE_IS_CONSTANT) && local_slot;
+  }
+  void SetLocalSlot(Value* lslot) {
+    assert(!(flags & VALUE_IS_CONSTANT));
+    local_slot = lslot;
+  }
 
+  Value* GetLocalSlot() {
+    return (flags & VALUE_IS_CONSTANT) ? nullptr : local_slot;
+  }
+  const Value* GetLocalSlot() const {
+    return (flags & VALUE_IS_CONSTANT) ? nullptr : local_slot;
+  }
   inline bool IsConstant() const { return !!(flags & VALUE_IS_CONSTANT); }
+
+  inline bool IsEqual(const Value* other) const {
+    if (this == other) {
+      return true;
+    } else if ((this->flags & other->flags) & VALUE_IS_CONSTANT) {
+      return this->IsConstantEQ(other);
+    }
+    return false;
+  }
   bool IsConstantTrue() const {
     if (type == VEC128_TYPE) {
       assert_always();
@@ -278,7 +336,7 @@ class Value {
       return false;
     }
   }
-  bool IsConstantEQ(Value* other) const {
+  bool IsConstantEQ(const Value* other) const {
     if (type == VEC128_TYPE) {
       assert_always();
     }
@@ -505,8 +563,7 @@ class Value {
   void MulHi(Value* other, bool is_unsigned);
   void Div(Value* other, bool is_unsigned);
   void Max(Value* other);
-  static void MulAdd(Value* dest, Value* value1, Value* value2, Value* value3);
-  static void MulSub(Value* dest, Value* value1, Value* value2, Value* value3);
+
   void Neg();
   void Abs();
   void Sqrt();
@@ -516,10 +573,15 @@ class Value {
   void Or(Value* other);
   void Xor(Value* other);
   void Not();
+  void AndNot(Value* other);
   void Shl(Value* other);
   void Shr(Value* other);
   void Sha(Value* other);
+  void RotateLeft(Value* other);
+  void Insert(Value* index, Value* part, TypeName type);
   void Extract(Value* vec, Value* index);
+  void Permute(Value* src1, Value* src2, TypeName type);
+  void Swizzle(uint32_t mask, TypeName type);
   void Select(Value* other, Value* ctrl);
   void Splat(Value* other);
   void VectorCompareEQ(Value* other, TypeName type);
@@ -539,8 +601,23 @@ class Value {
   void VectorAverage(Value* other, TypeName type, bool is_unsigned,
                      bool saturate);
   void ByteSwap();
+  void DenormalFlush();
   void CountLeadingZeros(const Value* other);
   bool Compare(Opcode opcode, Value* other);
+  hir::Instr* GetDefSkipAssigns();
+  // tunnel_flags is updated to the kinds we actually traversed
+  hir::Instr* GetDefTunnelMovs(unsigned int* tunnel_flags);
+
+  // does the value only have one instr that uses it?
+  bool HasSingleUse() const;
+  // returns true if every single use is as an operand to a single instruction
+  // (add var2, var1, var1)
+  bool AllUsesByOneInsn() const;
+  // the maybe is here because this includes vec128, which is untyped data that
+  // can be treated as float or int depending on the context
+  bool MaybeFloaty() const {
+    return type == FLOAT32_TYPE || type == FLOAT64_TYPE || type == VEC128_TYPE;
+  }
 
  private:
   static bool CompareInt8(Opcode opcode, Value* a, Value* b);

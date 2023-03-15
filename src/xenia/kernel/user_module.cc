@@ -21,8 +21,6 @@
 #include "xenia/kernel/xfile.h"
 #include "xenia/kernel/xthread.h"
 
-DEFINE_bool(xex_apply_patches, true, "Apply XEX patches.", "Kernel");
-
 namespace xe {
 namespace kernel {
 
@@ -35,18 +33,36 @@ uint32_t UserModule::title_id() const {
   if (module_format_ != kModuleFormatXex) {
     return 0;
   }
-  auto header = xex_header();
-  for (uint32_t i = 0; i < header->header_count; i++) {
-    auto& opt_header = header->headers[i];
-    if (opt_header.key == XEX_HEADER_EXECUTION_INFO) {
-      auto opt_header_ptr =
-          reinterpret_cast<const uint8_t*>(header) + opt_header.offset;
-      auto opt_exec_info =
-          reinterpret_cast<const xex2_opt_execution_info*>(opt_header_ptr);
-      return static_cast<uint32_t>(opt_exec_info->title_id);
-    }
+
+  xex2_opt_execution_info* opt_exec_info = nullptr;
+  if (xex_module()->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &opt_exec_info)) {
+    return static_cast<uint32_t>(opt_exec_info->title_id);
   }
   return 0;
+}
+
+uint32_t UserModule::disc_number() const {
+  if (module_format_ != kModuleFormatXex) {
+    return 1;
+  }
+
+  xex2_opt_execution_info* opt_exec_info = nullptr;
+  if (xex_module()->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &opt_exec_info)) {
+    return static_cast<uint32_t>(opt_exec_info->disc_number);
+  }
+  return 1;
+}
+
+bool UserModule::is_multi_disc_title() const {
+  if (module_format_ != kModuleFormatXex) {
+    return false;
+  }
+
+  xex2_opt_execution_info* opt_exec_info = nullptr;
+  if (xex_module()->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &opt_exec_info)) {
+    return opt_exec_info->disc_count > 1;
+  }
+  return false;
 }
 
 X_STATUS UserModule::LoadFromFile(const std::string_view path) {
@@ -73,12 +89,6 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
 
     // Load the module.
     result = LoadFromMemory(mmap->data(), mmap->size());
-    if (XSUCCEEDED(result)) {
-      XXH3_state_t hash_state;
-      XXH3_64bits_reset(&hash_state);
-      XXH3_64bits_update(&hash_state, mmap->data(), mmap->size());
-      hash_ = XXH3_64bits_digest(&hash_state);
-    }
   } else {
     std::vector<uint8_t> buffer(fs_entry->size());
 
@@ -100,50 +110,10 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
     // Load the module.
     result = LoadFromMemory(buffer.data(), bytes_read);
 
-    // Generate xex hash
-    XXH3_state_t hash_state;
-    XXH3_64bits_reset(&hash_state);
-    XXH3_64bits_update(&hash_state, buffer.data(), bytes_read);
-    hash_ = XXH3_64bits_digest(&hash_state);
-
     // Close the file.
     file->Destroy();
   }
-
-  // Only XEX returns X_STATUS_PENDING
-  if (result != X_STATUS_PENDING) {
-    return result;
-  }
-
-  XELOGI("Module hash: {:08X} for {}", hash_, name_);
-
-  if (cvars::xex_apply_patches) {
-    // Search for xexp patch file
-    auto patch_entry = kernel_state()->file_system()->ResolvePath(path_ + "p");
-
-    if (patch_entry) {
-      auto patch_path = patch_entry->absolute_path();
-
-      XELOGI("Loading XEX patch from {}", patch_path);
-
-      auto patch_module = object_ref<UserModule>(new UserModule(kernel_state_));
-      result = patch_module->LoadFromFile(patch_path);
-      if (!result) {
-        result = patch_module->xex_module()->ApplyPatch(xex_module());
-        if (result) {
-          XELOGE("Failed to apply XEX patch, code: {}", result);
-        }
-      } else {
-        XELOGE("Failed to load XEX patch, code: {}", result);
-      }
-
-      if (result) {
-        return X_STATUS_UNSUCCESSFUL;
-      }
-    }
-  }
-
-  return LoadXexContinue();
+  return result;
 }
 
 X_STATUS UserModule::LoadFromMemory(const void* addr, const size_t length) {
@@ -209,7 +179,7 @@ X_STATUS UserModule::LoadFromMemory(const void* addr, const size_t length) {
   return X_STATUS_SUCCESS;
 }
 
-X_STATUS UserModule::LoadXexContinue() {
+X_STATUS UserModule::LoadContinue() {
   // LoadXexContinue: finishes loading XEX after a patch has been applied (or
   // patch wasn't found)
 
@@ -238,6 +208,13 @@ X_STATUS UserModule::LoadXexContinue() {
   // Cache some commonly used headers...
   this->xex_module()->GetOptHeader(XEX_HEADER_ENTRY_POINT, &entry_point_);
   this->xex_module()->GetOptHeader(XEX_HEADER_DEFAULT_STACK_SIZE, &stack_size_);
+
+  xe::be<uint32_t>* ws_size = 0;
+  this->xex_module()->GetOptHeader(XEX_HEADER_TITLE_WORKSPACE_SIZE, &ws_size);
+  // ToDo: Find better way to handle default and mimimal values!
+  if (ws_size && *ws_size) {
+    workspace_size_ = std::max(ws_size->get(), uint32_t(256 * 1024));
+  }
   is_dll_module_ = !!(header->module_flags & XEX_MODULE_DLL_MODULE);
 
   // Setup the loader data entry
@@ -248,6 +225,7 @@ X_STATUS UserModule::LoadXexContinue() {
   ldr_data->xex_header_base = guest_xex_header_;
   ldr_data->full_image_size = security_header->image_size;
   ldr_data->image_base = this->xex_module()->base_address();
+
   ldr_data->entry_point = entry_point_;
 
   OnLoad();
@@ -418,8 +396,13 @@ void UserModule::Dump() {
       kernel_state_->emulator()->export_resolver();
   auto header = xex_header();
 
+  CalculateHash();
+
   // XEX header.
   sb.AppendFormat("Module {}:\n", path_);
+
+  sb.AppendFormat("Module Hash: {:016X}\n", hash_.value_or(UINT64_MAX));
+
   sb.AppendFormat("    Module Flags: {:08X}\n", (uint32_t)header->module_flags);
 
   // Security header
@@ -800,7 +783,7 @@ void UserModule::Dump() {
           }
         }
         if (kernel_export &&
-            kernel_export->type == cpu::Export::Type::kVariable) {
+            kernel_export->get_type() == cpu::Export::Type::kVariable) {
           sb.AppendFormat("   V {:08X}          {:03X} ({:4}) {} {}\n",
                           info->value_address, info->ordinal, info->ordinal,
                           implemented ? "  " : "!!", name);
@@ -819,5 +802,46 @@ void UserModule::Dump() {
   xe::logging::AppendLogLine(xe::LogLevel::Info, 'i', sb.to_string_view());
 }
 
+void UserModule::CalculateHash() {
+  const BaseHeap* module_heap =
+      kernel_state_->memory()->LookupHeap(xex_module()->base_address());
+
+  if (!module_heap) {
+    XELOGE("Invalid heap for xex module! Address: {:08X}",
+           xex_module()->base_address());
+    return;
+  }
+
+  const uint32_t page_size = module_heap->page_size();
+  auto security_info = xex_module()->xex_security_info();
+
+  auto find_code_section_page = [&security_info](bool from_bottom) {
+    for (uint32_t i = 0; i < security_info->page_descriptor_count; i++) {
+      const uint32_t page_index =
+          from_bottom ? i : (security_info->page_descriptor_count - 1) - i;
+      xex2_page_descriptor page_descriptor;
+      page_descriptor.value =
+          xe::byte_swap(security_info->page_descriptors[page_index].value);
+      if (page_descriptor.info != XEX_SECTION_CODE) {
+        continue;
+      }
+      return page_index;
+    }
+    return UINT32_MAX;
+  };
+
+  const uint32_t start_address =
+      xex_module()->base_address() + (find_code_section_page(true) * page_size);
+  const uint32_t end_address =
+      xex_module()->base_address() +
+      ((find_code_section_page(false) + 1) * page_size);
+
+  uint8_t* base_code_adr = memory()->TranslateVirtual(start_address);
+
+  XXH3_state_t hash_state;
+  XXH3_64bits_reset(&hash_state);
+  XXH3_64bits_update(&hash_state, base_code_adr, end_address - start_address);
+  hash_ = XXH3_64bits_digest(&hash_state);
+}
 }  // namespace kernel
 }  // namespace xe

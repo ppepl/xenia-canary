@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2021 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -139,6 +139,7 @@ X_STATUS XmaDecoder::Setup(kernel::KernelState* kernel_state) {
 
   worker_running_ = true;
   work_event_ = xe::threading::Event::CreateAutoResetEvent(false);
+  assert_not_null(work_event_);
   worker_thread_ = kernel::object_ref<kernel::XHostThread>(
       new kernel::XHostThread(kernel_state, 128 * 1024, 0, [this]() {
         WorkerThreadMain();
@@ -176,14 +177,7 @@ void XmaDecoder::WorkerThreadMain() {
     } else {
       idle_loop_count = 0;
     }
-
-    if (idle_loop_count > 500) {
-      // Idle for an extended period. Introduce a 20ms wait.
-      xe::threading::Wait(work_event_.get(), false,
-                          std::chrono::milliseconds(20));
-    }
-
-    xe::threading::MaybeYield();
+    xe::threading::Wait(work_event_.get(), false);
   }
 }
 
@@ -315,7 +309,7 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
       }
     }
     // Signal the decoder thread to start processing.
-    work_event_->Set();
+    work_event_->SetBoostPriority();
   } else if (r >= XmaRegister::Context0Lock && r <= XmaRegister::Context9Lock) {
     // Context lock command.
     // This requests a lock by flagging the context.
@@ -346,6 +340,8 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     // 0601h (1804h) is written to with 0x02000000 and 0x03000000 around a lock
     // operation
     switch (r) {
+      case 0x601:
+        break;
       default: {
         const auto register_info = register_file_.GetRegisterInfo(r);
         if (register_info) {

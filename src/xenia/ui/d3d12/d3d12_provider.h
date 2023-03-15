@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2018 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -14,24 +14,39 @@
 
 #include "xenia/ui/d3d12/d3d12_api.h"
 #include "xenia/ui/graphics_provider.h"
-
+// chrispy: this is here to prevent clang format from moving d3d12_nvapi above
+// the headers it depends on
+#define HEADERFENCE
+#undef HEADERFENCE
+#include "xenia/gpu/d3d12/d3d12_nvapi.hpp"
 #define XE_UI_D3D12_FINE_GRAINED_DRAW_SCOPES 1
 
 namespace xe {
 namespace ui {
 namespace d3d12 {
-
+enum {
+  UPLOAD_RESULT_CREATE_FAILED = 0,
+  UPLOAD_RESULT_CREATE_SUCCESS = 1,
+  UPLOAD_RESULT_CREATE_CPUVISIBLE = 2
+};
 class D3D12Provider : public GraphicsProvider {
  public:
-  ~D3D12Provider() override;
+  ~D3D12Provider();
 
   static bool IsD3D12APIAvailable();
 
   static std::unique_ptr<D3D12Provider> Create();
 
-  std::unique_ptr<GraphicsContext> CreateContext(
-      Window* target_window) override;
-  std::unique_ptr<GraphicsContext> CreateOffscreenContext() override;
+  std::unique_ptr<Presenter> CreatePresenter(
+      Presenter::HostGpuLossCallback host_gpu_loss_callback =
+          Presenter::FatalErrorHostGpuLossCallback) override;
+
+  std::unique_ptr<ImmediateDrawer> CreateImmediateDrawer() override;
+  uint32_t CreateUploadResource(
+      D3D12_HEAP_FLAGS HeapFlags, _In_ const D3D12_RESOURCE_DESC* pDesc,
+      D3D12_RESOURCE_STATES InitialResourceState, REFIID riidResource,
+      void** ppvResource, bool try_create_cpuvisible = false,
+      const D3D12_CLEAR_VALUE* pOptimizedClearValue = nullptr) const;
 
   IDXGIFactory2* GetDXGIFactory() const { return dxgi_factory_; }
   // nullptr if PIX not attached.
@@ -106,6 +121,9 @@ class D3D12Provider : public GraphicsProvider {
   D3D12_TILED_RESOURCES_TIER GetTiledResourcesTier() const {
     return tiled_resources_tier_;
   }
+  bool AreUnalignedBlockTexturesSupported() const {
+    return unaligned_block_textures_supported_;
+  }
   uint32_t GetVirtualAddressBitsPerResource() const {
     return virtual_address_bits_per_resource_;
   }
@@ -117,11 +135,6 @@ class D3D12Provider : public GraphicsProvider {
                                  ID3DBlob** error_blob_out) const {
     return pfn_d3d12_serialize_root_signature_(desc, version, blob_out,
                                                error_blob_out);
-  }
-  HRESULT CreateDCompositionDevice(IDXGIDevice* dxgi_device, const IID& iid,
-                                   void** dcomposition_device_out) const {
-    return pfn_dcomposition_create_device_(dxgi_device, iid,
-                                           dcomposition_device_out);
   }
   HRESULT Disassemble(const void* src_data, size_t src_data_size, UINT flags,
                       const char* comments, ID3DBlob** disassembly_out) const {
@@ -156,21 +169,16 @@ class D3D12Provider : public GraphicsProvider {
                                                  _COM_Outptr_ void** ppFactory);
   typedef HRESULT(WINAPI* PFNDXGIGetDebugInterface1)(
       UINT Flags, REFIID riid, _COM_Outptr_ void** pDebug);
-  typedef HRESULT(WINAPI* PFNDCompositionCreateDevice)(
-      _In_opt_ IDXGIDevice* dxgiDevice, _In_ REFIID iid,
-      _Outptr_ void** dcompositionDevice);
 
   HMODULE library_dxgi_ = nullptr;
   PFNCreateDXGIFactory2 pfn_create_dxgi_factory2_;
-  PFNDXGIGetDebugInterface1 pfn_dxgi_get_debug_interface1_;
+  // Needed during shutdown as well to report live objects, so may be nullptr.
+  PFNDXGIGetDebugInterface1 pfn_dxgi_get_debug_interface1_ = nullptr;
 
   HMODULE library_d3d12_ = nullptr;
   PFN_D3D12_GET_DEBUG_INTERFACE pfn_d3d12_get_debug_interface_;
   PFN_D3D12_CREATE_DEVICE pfn_d3d12_create_device_;
   PFN_D3D12_SERIALIZE_ROOT_SIGNATURE pfn_d3d12_serialize_root_signature_;
-
-  HMODULE library_dcomp_ = nullptr;
-  PFNDCompositionCreateDevice pfn_dcomposition_create_device_;
 
   HMODULE library_d3dcompiler_ = nullptr;
   pD3DDisassemble pfn_d3d_disassemble_ = nullptr;
@@ -182,9 +190,9 @@ class D3D12Provider : public GraphicsProvider {
   DxcCreateInstanceProc pfn_dxcompiler_dxc_create_instance_ = nullptr;
 
   IDXGIFactory2* dxgi_factory_ = nullptr;
-  IDXGraphicsAnalysis* graphics_analysis_ = nullptr;
   ID3D12Device* device_ = nullptr;
   ID3D12CommandQueue* direct_queue_ = nullptr;
+  IDXGraphicsAnalysis* graphics_analysis_ = nullptr;
 
   uint32_t descriptor_sizes_[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES];
 
@@ -192,11 +200,20 @@ class D3D12Provider : public GraphicsProvider {
 
   D3D12_HEAP_FLAGS heap_flag_create_not_zeroed_;
   D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER programmable_sample_positions_tier_;
-  bool ps_specified_stencil_reference_supported_;
-  bool rasterizer_ordered_views_supported_;
   D3D12_RESOURCE_BINDING_TIER resource_binding_tier_;
   D3D12_TILED_RESOURCES_TIER tiled_resources_tier_;
   uint32_t virtual_address_bits_per_resource_;
+  bool ps_specified_stencil_reference_supported_;
+  bool rasterizer_ordered_views_supported_;
+  bool unaligned_block_textures_supported_;
+
+  lightweight_nvapi::nvapi_state_t* nvapi_;
+  lightweight_nvapi::cb_NvAPI_D3D12_CreateCommittedResource
+      nvapi_createcommittedresource_ = nullptr;
+  lightweight_nvapi::cb_NvAPI_D3D12_UseDriverHeapPriorities
+      nvapi_usedriverheappriorities_ = nullptr;
+  lightweight_nvapi::cb_NvAPI_D3D12_QueryCpuVisibleVidmem
+      nvapi_querycpuvisiblevidmem_ = nullptr;
 };
 
 }  // namespace d3d12

@@ -41,18 +41,32 @@
 #error Unsupported target OS.
 #endif
 
-#if defined(__clang__)
+#if defined(__clang__) && !defined(_MSC_VER)  // chrispy: support clang-cl
 #define XE_COMPILER_CLANG 1
+#define XE_COMPILER_HAS_CLANG_EXTENSIONS 1
 #elif defined(__GNUC__)
 #define XE_COMPILER_GNUC 1
+#define XE_COMPILER_HAS_GNU_EXTENSIONS 1
 #elif defined(_MSC_VER)
 #define XE_COMPILER_MSVC 1
+#define XE_COMPILER_HAS_MSVC_EXTENSIONS 1
 #elif defined(__MINGW32)
 #define XE_COMPILER_MINGW32 1
+#define XE_COMPILER_HAS_GNU_EXTENSIONS 1
 #elif defined(__INTEL_COMPILER)
 #define XE_COMPILER_INTEL 1
 #else
 #define XE_COMPILER_UNKNOWN 1
+#endif
+// chrispy: had to place this here.
+#if defined(__clang__) && defined(_MSC_VER)
+#define XE_COMPILER_CLANG_CL 1
+#define XE_COMPILER_HAS_CLANG_EXTENSIONS 1
+#endif
+
+// clang extensions == superset of gnu extensions
+#if XE_COMPILER_HAS_CLANG_EXTENSIONS == 1
+#define XE_COMPILER_HAS_GNU_EXTENSIONS 1
 #endif
 
 #if defined(_M_AMD64) || defined(__amd64__)
@@ -67,9 +81,6 @@
 #endif
 
 #if XE_PLATFORM_WIN32
-#define strdup _strdup
-#define strcasecmp _stricmp
-#define strncasecmp _strnicmp
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX  // Don't want windows.h including min/max macros.
 #endif            // XE_PLATFORM_WIN32
@@ -96,6 +107,77 @@
 #define XEPACKEDSTRUCTANONYMOUS(value) _XEPACKEDSCOPE(struct value)
 #define XEPACKEDUNION(name, value) _XEPACKEDSCOPE(union name value)
 
+#if XE_COMPILER_HAS_MSVC_EXTENSIONS == 1
+#define XE_FORCEINLINE __forceinline
+#define XE_NOINLINE __declspec(noinline)
+// can't properly emulate "cold" in msvc, but can still segregate the function
+// into its own seg
+#define XE_COLD __declspec(code_seg(".cold"))
+#define XE_LIKELY(...) (!!(__VA_ARGS__))
+#define XE_UNLIKELY(...) (!!(__VA_ARGS__))
+#define XE_MSVC_ASSUME(...) __assume(__VA_ARGS__)
+#define XE_NOALIAS __declspec(noalias)
+#elif XE_COMPILER_HAS_GNU_EXTENSIONS == 1
+#define XE_FORCEINLINE __attribute__((always_inline))
+#define XE_NOINLINE __attribute__((noinline))
+#define XE_COLD __attribute__((cold))
+#define XE_LIKELY(...) __builtin_expect(!!(__VA_ARGS__), true)
+#define XE_UNLIKELY(...) __builtin_expect(!!(__VA_ARGS__), false)
+#define XE_NOALIAS
+// cant do unevaluated assume
+#define XE_MSVC_ASSUME(...) static_cast<void>(0)
+#else
+#define XE_FORCEINLINE inline
+#define XE_NOINLINE
+#define XE_COLD
+
+#define XE_LIKELY_IF(...) if (!!(__VA_ARGS__)) [[likely]]
+#define XE_UNLIKELY_IF(...) if (!!(__VA_ARGS__)) [[unlikely]]
+#define XE_NOALIAS
+#define XE_MSVC_ASSUME(...) static_cast<void>(0)
+
+#endif
+#if XE_COMPILER_HAS_MSVC_EXTENSIONS == 1
+#define XE_MSVC_OPTIMIZE_SMALL() __pragma(optimize("s", on))
+#define XE_MSVC_OPTIMIZE_REVERT() __pragma(optimize("", on))
+#else
+#define XE_MSVC_OPTIMIZE_SMALL()
+#define XE_MSVC_OPTIMIZE_REVERT()
+#endif
+
+#if XE_COMPILER_HAS_GNU_EXTENSIONS == 1
+#define XE_LIKELY_IF(...) if (XE_LIKELY(__VA_ARGS__))
+#define XE_UNLIKELY_IF(...) if (XE_UNLIKELY(__VA_ARGS__))
+#define XE_MAYBE_UNUSED		__attribute__((unused))
+#else
+#if __cplusplus >= 202002
+#define XE_LIKELY_IF(...) if (!!(__VA_ARGS__)) [[likely]]
+#define XE_UNLIKELY_IF(...) if (!!(__VA_ARGS__)) [[unlikely]]
+#else
+#define XE_LIKELY_IF(...) if (!!(__VA_ARGS__))
+#define XE_UNLIKELY_IF(...) if (!!(__VA_ARGS__))
+#endif
+#define XE_MAYBE_UNUSED		
+#endif
+// only use __restrict if MSVC, for clang/gcc we can use -fstrict-aliasing which
+// acts as __restrict across the board todo: __restrict is part of the type
+// system, we might actually have to still emit it on clang and gcc
+#if XE_COMPILER_CLANG_CL == 0 && XE_COMPILER_MSVC == 1
+
+#define XE_RESTRICT __restrict
+#else
+#define XE_RESTRICT
+#endif
+
+#if XE_ARCH_AMD64 == 1
+#define XE_HOST_CACHE_LINE_SIZE 64
+#elif XE_ARCH_ARM64 == 1
+#define XE_HOST_CACHE_LINE_SIZE 64
+#else
+
+#error unknown cache line size for unknown architecture!
+#endif
+
 namespace xe {
 
 #if XE_PLATFORM_WIN32
@@ -107,5 +189,7 @@ const char kPathSeparator = '/';
 const char kGuestPathSeparator = '\\';
 
 }  // namespace xe
-
+#if XE_ARCH_AMD64 == 1
+#include "platform_amd64.h"
+#endif
 #endif  // XENIA_BASE_PLATFORM_H_

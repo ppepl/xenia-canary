@@ -208,13 +208,9 @@ int InstrEmit_stvxl128(PPCHIRBuilder& f, const InstrData& i) {
 int InstrEmit_lvlx_(PPCHIRBuilder& f, const InstrData& i, uint32_t vd,
                     uint32_t ra, uint32_t rb) {
   Value* ea = CalculateEA_0(f, ra, rb);
-  Value* eb = f.And(f.Truncate(ea, INT8_TYPE), f.LoadConstantInt8(0xF));
-  // ea &= ~0xF
-  ea = f.And(ea, f.LoadConstantUint64(~0xFull));
-  // v = (new << eb)
-  Value* v = f.Permute(f.LoadVectorShl(eb), f.ByteSwap(f.Load(ea, VEC128_TYPE)),
-                       f.LoadZeroVec128(), INT8_TYPE);
-  f.StoreVR(vd, v);
+
+  Value* val = f.LoadVectorLeft(ea);
+  f.StoreVR(vd, val);
   return 0;
 }
 int InstrEmit_lvlx(PPCHIRBuilder& f, const InstrData& i) {
@@ -237,25 +233,9 @@ int InstrEmit_lvrx_(PPCHIRBuilder& f, const InstrData& i, uint32_t vd,
   // buffer, which sometimes may be nothing and hang off the end of the valid
   // page area. We still need to zero the resulting register, though.
   Value* ea = CalculateEA_0(f, ra, rb);
-  Value* eb = f.And(f.Truncate(ea, INT8_TYPE), f.LoadConstantInt8(0xF));
-  // Skip if %16=0 (just load zero).
-  auto load_label = f.NewLabel();
-  auto end_label = f.NewLabel();
-  f.BranchTrue(eb, load_label);
-  f.StoreVR(vd, f.LoadZeroVec128());
-  f.Branch(end_label);
-  f.MarkLabel(load_label);
-  // ea &= ~0xF
-  // NOTE: need to recalculate ea and eb because after Branch we start a new
-  // block and we can't use their previous instantiation in the new block
-  ea = CalculateEA_0(f, ra, rb);
-  eb = f.And(f.Truncate(ea, INT8_TYPE), f.LoadConstantInt8(0xF));
-  ea = f.And(ea, f.LoadConstantUint64(~0xFull));
-  // v = (new >> (16 - eb))
-  Value* v = f.Permute(f.LoadVectorShl(eb), f.LoadZeroVec128(),
-                       f.ByteSwap(f.Load(ea, VEC128_TYPE)), INT8_TYPE);
-  f.StoreVR(vd, v);
-  f.MarkLabel(end_label);
+
+  Value* val = f.LoadVectorRight(ea);
+  f.StoreVR(vd, val);
   return 0;
 }
 int InstrEmit_lvrx(PPCHIRBuilder& f, const InstrData& i) {
@@ -275,20 +255,11 @@ int InstrEmit_stvlx_(PPCHIRBuilder& f, const InstrData& i, uint32_t vd,
                      uint32_t ra, uint32_t rb) {
   // NOTE: if eb == 0 (so 16b aligned) this equals new_value
   //       we could optimize this to prevent the other load/mask, in that case.
+
   Value* ea = CalculateEA_0(f, ra, rb);
-  Value* eb = f.And(f.Truncate(ea, INT8_TYPE), f.LoadConstantInt8(0xF));
-  // ea &= ~0xF
-  ea = f.And(ea, f.LoadConstantUint64(~0xFull));
-  // v = (old & ~mask) | ((new >> eb) & mask)
-  Value* new_value = f.Permute(f.LoadVectorShr(eb), f.LoadZeroVec128(),
-                               f.LoadVR(vd), INT8_TYPE);
-  Value* old_value = f.ByteSwap(f.Load(ea, VEC128_TYPE));
-  // mask = FFFF... >> eb
-  Value* mask = f.Permute(f.LoadVectorShr(eb), f.LoadZeroVec128(),
-                          f.Not(f.LoadZeroVec128()), INT8_TYPE);
-  Value* v = f.Or(f.And(old_value, f.Not(mask)), f.And(new_value, mask));
-  // ea &= ~0xF (handled above)
-  f.Store(ea, f.ByteSwap(v));
+
+  Value* vdr = f.LoadVR(vd);
+  f.StoreVectorLeft(ea, vdr);
   return 0;
 }
 int InstrEmit_stvlx(PPCHIRBuilder& f, const InstrData& i) {
@@ -311,27 +282,9 @@ int InstrEmit_stvrx_(PPCHIRBuilder& f, const InstrData& i, uint32_t vd,
   // buffer, which sometimes may be nothing and hang off the end of the valid
   // page area.
   Value* ea = CalculateEA_0(f, ra, rb);
-  Value* eb = f.And(f.Truncate(ea, INT8_TYPE), f.LoadConstantInt8(0xF));
-  // Skip if %16=0 (no data to store).
-  auto skip_label = f.NewLabel();
-  f.BranchFalse(eb, skip_label);
-  // ea &= ~0xF
-  // NOTE: need to recalculate ea and eb because after Branch we start a new
-  // block and we can't use their previous instantiation in the new block
-  ea = CalculateEA_0(f, ra, rb);
-  eb = f.And(f.Truncate(ea, INT8_TYPE), f.LoadConstantInt8(0xF));
-  ea = f.And(ea, f.LoadConstantUint64(~0xFull));
-  // v = (old & ~mask) | ((new << eb) & mask)
-  Value* new_value = f.Permute(f.LoadVectorShr(eb), f.LoadVR(vd),
-                               f.LoadZeroVec128(), INT8_TYPE);
-  Value* old_value = f.ByteSwap(f.Load(ea, VEC128_TYPE));
-  // mask = ~FFFF... >> eb
-  Value* mask = f.Permute(f.LoadVectorShr(eb), f.Not(f.LoadZeroVec128()),
-                          f.LoadZeroVec128(), INT8_TYPE);
-  Value* v = f.Or(f.And(old_value, f.Not(mask)), f.And(new_value, mask));
-  // ea &= ~0xF (handled above)
-  f.Store(ea, f.ByteSwap(v));
-  f.MarkLabel(skip_label);
+
+  Value* vdr = f.LoadVR(vd);
+  f.StoreVectorRight(ea, vdr);
   return 0;
 }
 int InstrEmit_stvrx(PPCHIRBuilder& f, const InstrData& i) {
@@ -348,13 +301,26 @@ int InstrEmit_stvrxl128(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_mfvscr(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // is this the right format?
+
+  f.StoreVR(i.VX128_1.RB,
+            f.LoadContext(offsetof(PPCContext, vscr_vec), VEC128_TYPE));
+  return 0;
 }
 
 int InstrEmit_mtvscr(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // is this the right format?
+  // todo: what mtvscr does with the unused bits is implementation defined,
+  // figure out what it does
+
+  Value* v = f.LoadVR(i.VX128_1.RB);
+
+  Value* has_njm_value = f.Extract(v, (uint8_t)3, INT32_TYPE);
+
+  f.SetNJM(f.IsTrue(f.And(has_njm_value, f.LoadConstantInt32(65536))));
+
+  f.StoreContext(offsetof(PPCContext, vscr_vec), v);
+  return 0;
 }
 
 int InstrEmit_vaddcuw(PPCHIRBuilder& f, const InstrData& i) {
@@ -459,7 +425,7 @@ int InstrEmit_vand128(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_vandc_(PPCHIRBuilder& f, uint32_t vd, uint32_t va, uint32_t vb) {
   // VD <- (VA) & ¬(VB)
-  Value* v = f.And(f.LoadVR(va), f.Not(f.LoadVR(vb)));
+  Value* v = f.AndNot(f.LoadVR(va), f.LoadVR(vb));
   f.StoreVR(vd, v);
   return 0;
 }
@@ -815,8 +781,16 @@ int InstrEmit_vlogefp128(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_vmaddfp_(PPCHIRBuilder& f, uint32_t vd, uint32_t va, uint32_t vb,
                        uint32_t vc) {
+  /*
+      chrispy: testing on POWER8 revealed that altivec vmaddfp unconditionally
+     flushes denormal inputs to 0, regardless of NJM setting
+  */
+  Value* a = f.VectorDenormFlush(f.LoadVR(va));
+  Value* b = f.VectorDenormFlush(f.LoadVR(vb));
+  Value* c = f.VectorDenormFlush(f.LoadVR(vc));
   // (VD) <- ((VA) * (VC)) + (VB)
-  Value* v = f.MulAdd(f.LoadVR(va), f.LoadVR(vc), f.LoadVR(vb));
+  Value* v = f.MulAdd(a, c, b);
+  // todo: do denormal results also unconditionally become 0?
   f.StoreVR(vd, v);
   return 0;
 }
@@ -832,9 +806,14 @@ int InstrEmit_vmaddfp128(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_vmaddcfp128(PPCHIRBuilder& f, const InstrData& i) {
+  /*
+    see vmaddfp about these denormflushes
+  */
+  Value* a = f.VectorDenormFlush(f.LoadVR(VX128_VA128));
+  Value* b = f.VectorDenormFlush(f.LoadVR(VX128_VB128));
+  Value* d = f.VectorDenormFlush(f.LoadVR(VX128_VD128));
   // (VD) <- ((VA) * (VD)) + (VB)
-  Value* v = f.MulAdd(f.LoadVR(VX128_VA128), f.LoadVR(VX128_VD128),
-                      f.LoadVR(VX128_VB128));
+  Value* v = f.MulAdd(a, d, b);
   f.StoreVR(VX128_VD128, v);
   return 0;
 }
@@ -1085,7 +1064,8 @@ int InstrEmit_vmsum3fp128(PPCHIRBuilder& f, const InstrData& i) {
   // Dot product XYZ.
   // (VD.xyzw) = (VA.x * VB.x) + (VA.y * VB.y) + (VA.z * VB.z)
   Value* v = f.DotProduct3(f.LoadVR(VX128_VA128), f.LoadVR(VX128_VB128));
-  v = f.Splat(v, VEC128_TYPE);
+  // chrispy: denormal outputs for Dot product are unconditionally made 0
+  v = f.VectorDenormFlush(v);
   f.StoreVR(VX128_VD128, v);
   return 0;
 }
@@ -1094,7 +1074,7 @@ int InstrEmit_vmsum4fp128(PPCHIRBuilder& f, const InstrData& i) {
   // Dot product XYZW.
   // (VD.xyzw) = (VA.x * VB.x) + (VA.y * VB.y) + (VA.z * VB.z) + (VA.w * VB.w)
   Value* v = f.DotProduct4(f.LoadVR(VX128_VA128), f.LoadVR(VX128_VB128));
-  v = f.Splat(v, VEC128_TYPE);
+  v = f.VectorDenormFlush(v);
   f.StoreVR(VX128_VD128, v);
   return 0;
 }
@@ -1151,7 +1131,19 @@ int InstrEmit_vnmsubfp_(PPCHIRBuilder& f, uint32_t vd, uint32_t va, uint32_t vb,
   // (VD) <- -(((VA) * (VC)) - (VB))
   // NOTE: only one rounding should take place, but that's hard...
   // This really needs VFNMSUB132PS/VFNMSUB213PS/VFNMSUB231PS but that's AVX.
-  Value* v = f.Neg(f.MulSub(f.LoadVR(va), f.LoadVR(vc), f.LoadVR(vb)));
+  // NOTE2: we could make vnmsub a new opcode, and then do it in double
+  // precision, rounding after the neg
+
+  /*
+  chrispy: this is untested, but i believe this has the same DAZ behavior for
+  inputs as vmadd
+  */
+
+  Value* a = f.VectorDenormFlush(f.LoadVR(va));
+  Value* b = f.VectorDenormFlush(f.LoadVR(vb));
+  Value* c = f.VectorDenormFlush(f.LoadVR(vc));
+
+  Value* v = f.NegatedMulSub(a, c, b);
   f.StoreVR(vd, v);
   return 0;
 }
@@ -1348,7 +1340,7 @@ int InstrEmit_vrlimi128(PPCHIRBuilder& f, const InstrData& i) {
         swizzle_mask = SWIZZLE_XYZW_TO_WXYZ;
         break;
       default:
-        assert_always();
+        XEINSTRNOTIMPLEMENTED();
         return 1;
     }
     v = f.Swizzle(f.LoadVR(vb), FLOAT32_TYPE, swizzle_mask);
@@ -1393,11 +1385,23 @@ int InstrEmit_vsel(PPCHIRBuilder& f, const InstrData& i) {
 int InstrEmit_vsel128(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_vsel_(f, VX128_VD128, VX128_VA128, VX128_VB128, VX128_VD128);
 }
+// chrispy: this is test code for checking whether a game takes advantage of the
+// VSR/VSL undocumented/undefined variable shift behavior
+static void AssertShiftElementsOk(PPCHIRBuilder& f, Value* v) {
+#if 0
+  Value* splatted = f.Splat(f.Extract(v, (uint8_t)0, INT8_TYPE), VEC128_TYPE);
 
+  Value* checkequal = f.Xor(splatted, v);
+  f.DebugBreakTrue(f.IsTrue(checkequal));
+#endif
+}
 int InstrEmit_vsl(PPCHIRBuilder& f, const InstrData& i) {
-  Value* v = f.Shl(f.LoadVR(i.VX.VA),
-                   f.And(f.Extract(f.LoadVR(i.VX.VB), 15, INT8_TYPE),
-                         f.LoadConstantInt8(0b111)));
+  Value* va = f.LoadVR(i.VX.VA);
+  Value* vb = f.LoadVR(i.VX.VB);
+
+  AssertShiftElementsOk(f, vb);
+  Value* v =
+      f.Shl(va, f.And(f.Extract(vb, 15, INT8_TYPE), f.LoadConstantInt8(0b111)));
   f.StoreVR(i.VX.VD, v);
   return 0;
 }
@@ -1577,9 +1581,13 @@ int InstrEmit_vspltisw128(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_vsr(PPCHIRBuilder& f, const InstrData& i) {
-  Value* v = f.Shr(f.LoadVR(i.VX.VA),
-                   f.And(f.Extract(f.LoadVR(i.VX.VB), 15, INT8_TYPE),
-                         f.LoadConstantInt8(0b111)));
+  Value* va = f.LoadVR(i.VX.VA);
+  Value* vb = f.LoadVR(i.VX.VB);
+
+  AssertShiftElementsOk(f, vb);
+
+  Value* v =
+      f.Shr(va, f.And(f.Extract(vb, 15, INT8_TYPE), f.LoadConstantInt8(0b111)));
   f.StoreVR(i.VX.VD, v);
   return 0;
 }
@@ -1777,9 +1785,38 @@ int InstrEmit_vsum4ubs(PPCHIRBuilder& f, const InstrData& i) {
   return 1;
 }
 
+static Value* vkpkx_in_low(PPCHIRBuilder& f, Value* input) {
+  // truncate from argb8888 to 1 bit alpha, 5 bit red, 5 bit green, 5 bit blue
+  auto ShrU32Vec = [&f](Value* input, unsigned shift) {
+    return f.VectorShr(input, f.LoadConstantVec128(vec128i(shift)), INT32_TYPE);
+  };
+  auto AndU32Vec = [&f](Value* input, unsigned msk) {
+    return f.And(input, f.LoadConstantVec128(vec128i(msk)));
+  };
+  auto tmp1 = AndU32Vec(ShrU32Vec(input, 9), 0xFC00);
+  auto tmp2 = AndU32Vec(ShrU32Vec(input, 6), 0x3E0);
+  auto tmp3 = AndU32Vec(ShrU32Vec(input, 3), 0x1F);
+  return f.Or(tmp3, f.Or(tmp1, tmp2));
+}
+
 int InstrEmit_vpkpx(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // I compared the results of this against over a million randomly generated
+  // sets of inputs and all compared equal
+
+  Value* src1 = f.LoadVR(i.VX.VA);
+
+  Value* src2 = f.LoadVR(i.VX.VB);
+
+  Value* pck1 = vkpkx_in_low(f, src1);
+  Value* pck2 = vkpkx_in_low(f, src2);
+
+  Value* result = f.Pack(
+      pck1, pck2,
+      PACK_TYPE_16_IN_32 | PACK_TYPE_IN_UNSIGNED | PACK_TYPE_OUT_UNSIGNED);
+
+  f.StoreVR(i.VX.VD, result);
+
+  return 0;
 }
 
 int InstrEmit_vpkshss_(PPCHIRBuilder& f, uint32_t vd, uint32_t va,
@@ -1977,8 +2014,7 @@ int InstrEmit_vupkhsh(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_vupkhsh_(f, i.VX.VD, i.VX.VB);
 }
 int InstrEmit_vupkhsh128(PPCHIRBuilder& f, const InstrData& i) {
-  uint32_t va = VX128_VA128;
-  assert_zero(va);
+  assert_zero(VX128_VA128);
   return InstrEmit_vupkhsh_(f, VX128_VD128, VX128_VB128);
 }
 
@@ -1995,8 +2031,7 @@ int InstrEmit_vupklsh(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_vupklsh_(f, i.VX.VD, i.VX.VB);
 }
 int InstrEmit_vupklsh128(PPCHIRBuilder& f, const InstrData& i) {
-  uint32_t va = VX128_VA128;
-  assert_zero(va);
+  assert_zero(VX128_VA128);
   return InstrEmit_vupklsh_(f, VX128_VD128, VX128_VB128);
 }
 

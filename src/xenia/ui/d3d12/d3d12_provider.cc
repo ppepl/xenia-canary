@@ -15,8 +15,9 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
-#include "xenia/ui/d3d12/d3d12_context.h"
-
+#include "xenia/ui/d3d12/d3d12_immediate_drawer.h"
+#include "xenia/ui/d3d12/d3d12_presenter.h"
+#include "xenia/ui/d3d12/d3d12_util.h"
 DEFINE_bool(d3d12_debug, false, "Enable Direct3D 12 and DXGI debug layer.",
             "D3D12");
 DEFINE_bool(d3d12_break_on_error, false,
@@ -34,6 +35,8 @@ DEFINE_int32(
     "system responsibility)",
     "D3D12");
 
+DEFINE_bool(d3d12_nvapi_use_driver_heap_priorities, false, "nvidia stuff",
+            "D3D12");
 namespace xe {
 namespace ui {
 namespace d3d12 {
@@ -60,6 +63,7 @@ std::unique_ptr<D3D12Provider> D3D12Provider::Create() {
         "supported GPUs.");
     return nullptr;
   }
+
   return provider;
 }
 
@@ -77,6 +81,14 @@ D3D12Provider::~D3D12Provider() {
     dxgi_factory_->Release();
   }
 
+  if (cvars::d3d12_debug && pfn_dxgi_get_debug_interface1_) {
+    Microsoft::WRL::ComPtr<IDXGIDebug> dxgi_debug;
+    if (SUCCEEDED(
+            pfn_dxgi_get_debug_interface1_(0, IID_PPV_ARGS(&dxgi_debug)))) {
+      dxgi_debug->ReportLiveObjects(DXGI_DEBUG_ALL, DXGI_DEBUG_RLO_ALL);
+    }
+  }
+
   if (library_dxcompiler_ != nullptr) {
     FreeLibrary(library_dxcompiler_);
   }
@@ -85,9 +97,6 @@ D3D12Provider::~D3D12Provider() {
   }
   if (library_d3dcompiler_ != nullptr) {
     FreeLibrary(library_d3dcompiler_);
-  }
-  if (library_dcomp_ != nullptr) {
-    FreeLibrary(library_dcomp_);
   }
   if (library_d3d12_ != nullptr) {
     FreeLibrary(library_d3d12_);
@@ -120,9 +129,8 @@ bool D3D12Provider::Initialize() {
   // Load the core libraries.
   library_dxgi_ = LoadLibraryW(L"dxgi.dll");
   library_d3d12_ = LoadLibraryW(L"D3D12.dll");
-  library_dcomp_ = LoadLibraryW(L"dcomp.dll");
-  if (!library_dxgi_ || !library_d3d12_ || !library_dcomp_) {
-    XELOGE("Failed to load dxgi.dll, D3D12.dll or dcomp.dll");
+  if (!library_dxgi_ || !library_d3d12_) {
+    XELOGE("Failed to load dxgi.dll or D3D12.dll");
     return false;
   }
   bool libraries_loaded = true;
@@ -143,12 +151,8 @@ bool D3D12Provider::Initialize() {
       (pfn_d3d12_serialize_root_signature_ = PFN_D3D12_SERIALIZE_ROOT_SIGNATURE(
            GetProcAddress(library_d3d12_, "D3D12SerializeRootSignature"))) !=
       nullptr;
-  libraries_loaded &=
-      (pfn_dcomposition_create_device_ = PFNDCompositionCreateDevice(
-           GetProcAddress(library_dcomp_, "DCompositionCreateDevice"))) !=
-      nullptr;
   if (!libraries_loaded) {
-    XELOGE("Failed to get DXGI, Direct3D 12 or DirectComposition functions");
+    XELOGE("Failed to get DXGI or Direct3D 12 functions");
     return false;
   }
 
@@ -421,6 +425,7 @@ bool D3D12Provider::Initialize() {
   rasterizer_ordered_views_supported_ = false;
   resource_binding_tier_ = D3D12_RESOURCE_BINDING_TIER_1;
   tiled_resources_tier_ = D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED;
+  unaligned_block_textures_supported_ = false;
   D3D12_FEATURE_DATA_D3D12_OPTIONS options;
   if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS,
                                             &options, sizeof(options)))) {
@@ -438,6 +443,12 @@ bool D3D12Provider::Initialize() {
     programmable_sample_positions_tier_ =
         options2.ProgrammableSamplePositionsTier;
   }
+  D3D12_FEATURE_DATA_D3D12_OPTIONS8 options8;
+  if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS8,
+                                            &options8, sizeof(options8)))) {
+    unaligned_block_textures_supported_ =
+        bool(options8.UnalignedBlockTexturesSupported);
+  }
   virtual_address_bits_per_resource_ = 0;
   D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT virtual_address_support;
   if (SUCCEEDED(device->CheckFeatureSupport(
@@ -454,39 +465,90 @@ bool D3D12Provider::Initialize() {
       "* Programmable sample positions: tier {}\n"
       "* Rasterizer-ordered views: {}\n"
       "* Resource binding: tier {}\n"
-      "* Tiled resources: tier {}\n",
+      "* Tiled resources: tier {}\n"
+      "* Unaligned block-compressed textures: {}",
       virtual_address_bits_per_resource_,
       (heap_flag_create_not_zeroed_ & D3D12_HEAP_FLAG_CREATE_NOT_ZEROED) ? "yes"
                                                                          : "no",
       ps_specified_stencil_reference_supported_ ? "yes" : "no",
       uint32_t(programmable_sample_positions_tier_),
       rasterizer_ordered_views_supported_ ? "yes" : "no",
-      uint32_t(resource_binding_tier_), uint32_t(tiled_resources_tier_));
+      uint32_t(resource_binding_tier_), uint32_t(tiled_resources_tier_),
+      unaligned_block_textures_supported_ ? "yes" : "no");
 
   // Get the graphics analysis interface, will silently fail if PIX is not
   // attached.
   pfn_dxgi_get_debug_interface1_(0, IID_PPV_ARGS(&graphics_analysis_));
+  if (GetAdapterVendorID() == ui::GraphicsProvider::GpuVendorID::kNvidia) {
+    nvapi_ = new lightweight_nvapi::nvapi_state_t();
+    if (!nvapi_->is_available()) {
+      delete nvapi_;
+      nvapi_ = nullptr;
+    } else {
+      using namespace lightweight_nvapi;
 
+      nvapi_createcommittedresource_ =
+          (cb_NvAPI_D3D12_CreateCommittedResource)nvapi_->query_interface<void>(
+              id_NvAPI_D3D12_CreateCommittedResource);
+      nvapi_querycpuvisiblevidmem_ =
+          (cb_NvAPI_D3D12_QueryCpuVisibleVidmem)nvapi_->query_interface<void>(
+              id_NvAPI_D3D12_QueryCpuVisibleVidmem);
+      nvapi_usedriverheappriorities_ =
+          (cb_NvAPI_D3D12_UseDriverHeapPriorities)nvapi_->query_interface<void>(
+              id_NvAPI_D3D12_UseDriverHeapPriorities);
+
+      if (nvapi_usedriverheappriorities_) {
+        if (cvars::d3d12_nvapi_use_driver_heap_priorities) {
+          if (nvapi_usedriverheappriorities_(device_) != 0) {
+            XELOGI("Failed to enable driver heap priorities");
+          }
+        }
+      }
+    }
+  }
   return true;
 }
+uint32_t D3D12Provider::CreateUploadResource(
+    D3D12_HEAP_FLAGS HeapFlags, _In_ const D3D12_RESOURCE_DESC* pDesc,
+    D3D12_RESOURCE_STATES InitialResourceState, REFIID riidResource,
+    void** ppvResource, bool try_create_cpuvisible,
+    const D3D12_CLEAR_VALUE* pOptimizedClearValue) const {
+  auto device = GetDevice();
 
-std::unique_ptr<GraphicsContext> D3D12Provider::CreateContext(
-    Window* target_window) {
-  auto new_context =
-      std::unique_ptr<D3D12Context>(new D3D12Context(this, target_window));
-  if (!new_context->Initialize()) {
-    return nullptr;
+  if (try_create_cpuvisible && nvapi_createcommittedresource_) {
+    lightweight_nvapi::NV_RESOURCE_PARAMS nvrp;
+    nvrp.NVResourceFlags =
+        lightweight_nvapi::NV_D3D12_RESOURCE_FLAG_CPUVISIBLE_VIDMEM;
+    nvrp.version = 0;  // nothing checks the version
+
+    if (nvapi_createcommittedresource_(
+            device, &ui::d3d12::util::kHeapPropertiesUpload, HeapFlags, pDesc,
+            InitialResourceState, pOptimizedClearValue, &nvrp, riidResource,
+            ppvResource, nullptr) != 0) {
+      XELOGI(
+          "Failed to create CPUVISIBLE_VIDMEM upload resource, will just do "
+          "normal CreateCommittedResource");
+    } else {
+      return UPLOAD_RESULT_CREATE_CPUVISIBLE;
+    }
   }
-  return std::unique_ptr<GraphicsContext>(new_context.release());
+  if (FAILED(device->CreateCommittedResource(
+          &ui::d3d12::util::kHeapPropertiesUpload, HeapFlags, pDesc,
+          InitialResourceState, pOptimizedClearValue, riidResource,
+          ppvResource))) {
+    XELOGE("Failed to create the gamma ramp upload buffer");
+    return UPLOAD_RESULT_CREATE_FAILED;
+  }
+
+  return UPLOAD_RESULT_CREATE_SUCCESS;
+}
+std::unique_ptr<Presenter> D3D12Provider::CreatePresenter(
+    Presenter::HostGpuLossCallback host_gpu_loss_callback) {
+  return D3D12Presenter::Create(host_gpu_loss_callback, *this);
 }
 
-std::unique_ptr<GraphicsContext> D3D12Provider::CreateOffscreenContext() {
-  auto new_context =
-      std::unique_ptr<D3D12Context>(new D3D12Context(this, nullptr));
-  if (!new_context->Initialize()) {
-    return nullptr;
-  }
-  return std::unique_ptr<GraphicsContext>(new_context.release());
+std::unique_ptr<ImmediateDrawer> D3D12Provider::CreateImmediateDrawer() {
+  return D3D12ImmediateDrawer::Create(*this);
 }
 
 }  // namespace d3d12

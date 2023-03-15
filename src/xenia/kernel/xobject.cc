@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -34,12 +34,13 @@ XObject::XObject(Type type)
   handles_.reserve(10);
 }
 
-XObject::XObject(KernelState* kernel_state, Type type)
+XObject::XObject(KernelState* kernel_state, Type type, bool host_object)
     : kernel_state_(kernel_state),
       type_(type),
       pointer_ref_count_(1),
       guest_object_ptr_(0),
-      allocated_guest_object_(false) {
+      allocated_guest_object_(false),
+      host_object_(host_object) {
   handles_.reserve(10);
 
   // TODO: Assert kernel_state != nullptr in this constructor.
@@ -172,7 +173,7 @@ void XObject::SetAttributes(uint32_t obj_attributes_ptr) {
       memory(), xe::load_and_swap<uint32_t>(
                     memory()->TranslateVirtual(obj_attributes_ptr + 4)));
   if (!name.empty()) {
-    name_ = std::move(name);
+    name_ = std::string(name);
     kernel_state_->object_table()->AddNameMapping(name_, handles_[0]);
   }
 }
@@ -255,7 +256,8 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                                uint32_t wait_type, uint32_t wait_reason,
                                uint32_t processor_mode, uint32_t alertable,
                                uint64_t* opt_timeout) {
-  std::vector<xe::threading::WaitHandle*> wait_handles(count);
+  xe::threading::WaitHandle* wait_handles[64];
+
   for (size_t i = 0; i < count; ++i) {
     wait_handles[i] = objects[i]->GetWaitHandle();
     assert_not_null(wait_handles[i]);
@@ -267,7 +269,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                   : std::chrono::milliseconds::max();
 
   if (wait_type) {
-    auto result = xe::threading::WaitAny(std::move(wait_handles),
+    auto result = xe::threading::WaitAny(wait_handles, count,
                                          alertable ? true : false, timeout_ms);
     switch (result.first) {
       case xe::threading::WaitResult::kSuccess:
@@ -287,7 +289,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
         return X_STATUS_UNSUCCESSFUL;
     }
   } else {
-    auto result = xe::threading::WaitAll(std::move(wait_handles),
+    auto result = xe::threading::WaitAll(wait_handles, count,
                                          alertable ? true : false, timeout_ms);
     switch (result) {
       case xe::threading::WaitResult::kSuccess:
@@ -360,8 +362,8 @@ void XObject::SetNativePointer(uint32_t native_ptr, bool uninitialized) {
 }
 
 object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
-                                             void* native_ptr,
-                                             int32_t as_type) {
+                                             void* native_ptr, int32_t as_type,
+                                             bool already_locked) {
   assert_not_null(native_ptr);
 
   // Unfortunately the XDK seems to inline some KeInitialize calls, meaning
@@ -373,10 +375,12 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
   // We identify this by setting wait_list_flink to a magic value. When set,
   // wait_list_blink will hold a handle to our object.
 
-  auto global_lock = xe::global_critical_region::AcquireDirect();
+  if (!already_locked) {
+    global_critical_region::mutex().lock();
+  }
 
   auto header = reinterpret_cast<X_DISPATCH_HEADER*>(native_ptr);
-
+  XObject* result;
   if (as_type == -1) {
     as_type = header->type;
   }
@@ -385,10 +389,12 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
     // Already initialized.
     // TODO: assert if the type of the object != as_type
     uint32_t handle = header->wait_list_blink;
-    auto object = kernel_state->object_table()->LookupObject<XObject>(handle);
-
+    result = kernel_state->object_table()
+                 ->LookupObject<XObject>(handle, true)
+                 .release();
+    goto return_result;
     // TODO(benvanik): assert nothing has been changed in the struct.
-    return object;
+    // return object;
   } else {
     // First use, create new.
     // https://www.nirsoft.net/kernel_struct/vista/KOBJECTS.html
@@ -410,7 +416,9 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
       case 5:  // SemaphoreObject
       {
         auto sem = new XSemaphore(kernel_state);
-        sem->InitializeNative(native_ptr, header);
+        auto success = sem->InitializeNative(native_ptr, header);
+        // Can't report failure to the guest at late initialization:
+        assert_true(success);
         object = sem;
       } break;
       case 3:   // ProcessObject
@@ -428,14 +436,22 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
       case 24:  // ThreadedDpcObject
       default:
         assert_always();
-        return NULL;
+        result = nullptr;
+        goto return_result;
+
+        // return NULL;
     }
 
     // Stash pointer in struct.
     // FIXME: This assumes the object contains a dispatch header (some don't!)
     StashHandle(header, object->handle());
+    result = object;
 
-    return object_ref<XObject>(object);
+  return_result:
+    if (!already_locked) {
+      global_critical_region::mutex().unlock();
+    }
+    return object_ref<XObject>(result);
   }
 }
 

@@ -43,46 +43,69 @@ enum KeyType {
   KEY_TYPE_V_F64 = OPCODE_SIG_TYPE_V + FLOAT64_TYPE,
   KEY_TYPE_V_V128 = OPCODE_SIG_TYPE_V + VEC128_TYPE,
 };
-
+using InstrKeyValue = uint32_t;
 #pragma pack(push, 1)
 union InstrKey {
+  InstrKeyValue value;
   struct {
-    uint32_t opcode : 8;
-    uint32_t dest : 5;
-    uint32_t src1 : 5;
-    uint32_t src2 : 5;
-    uint32_t src3 : 5;
-    uint32_t reserved : 4;
+    InstrKeyValue opcode : 8;
+    InstrKeyValue dest : 5;
+    InstrKeyValue src1 : 5;
+    InstrKeyValue src2 : 5;
+    InstrKeyValue src3 : 5;
+    InstrKeyValue reserved : 4;
   };
-  uint32_t value;
 
-  operator uint32_t() const { return value; }
+  operator InstrKeyValue() const { return value; }
 
-  InstrKey() : value(0) {}
-  InstrKey(uint32_t v) : value(v) {}
+  InstrKey() : value(0) { static_assert_size(*this, sizeof(value)); }
+  InstrKey(InstrKeyValue v) : value(v) {}
+
+  // this used to take about 1% cpu while precompiling
+  // it kept reloading opcode, and also constantly repacking and unpacking the
+  // bitfields. instead, we pack the fields at the very end
   InstrKey(const Instr* i) : value(0) {
-    opcode = i->opcode->num;
-    uint32_t sig = i->opcode->signature;
-    dest =
-        GET_OPCODE_SIG_TYPE_DEST(sig) ? OPCODE_SIG_TYPE_V + i->dest->type : 0;
-    src1 = GET_OPCODE_SIG_TYPE_SRC1(sig);
-    if (src1 == OPCODE_SIG_TYPE_V) {
-      src1 += i->src1.value->type;
+    const OpcodeInfo* info = i->GetOpcodeInfo();
+
+    InstrKeyValue sig = info->signature;
+
+    OpcodeSignatureType dest_type, src1_type, src2_type, src3_type;
+
+    UnpackOpcodeSig(sig, dest_type, src1_type, src2_type, src3_type);
+
+    InstrKeyValue out_desttype = (InstrKeyValue)dest_type;
+    InstrKeyValue out_src1type = (InstrKeyValue)src1_type;
+    InstrKeyValue out_src2type = (InstrKeyValue)src2_type;
+    InstrKeyValue out_src3type = (InstrKeyValue)src3_type;
+
+    Value* destv = i->dest;
+    // pre-deref, even if not value
+    Value* src1v = i->src1.value;
+    Value* src2v = i->src2.value;
+    Value* src3v = i->src3.value;
+
+    if (out_src1type == OPCODE_SIG_TYPE_V) {
+      out_src1type += src1v->type;
     }
-    src2 = GET_OPCODE_SIG_TYPE_SRC2(sig);
-    if (src2 == OPCODE_SIG_TYPE_V) {
-      src2 += i->src2.value->type;
+
+    if (out_src2type == OPCODE_SIG_TYPE_V) {
+      out_src2type += src2v->type;
     }
-    src3 = GET_OPCODE_SIG_TYPE_SRC3(sig);
-    if (src3 == OPCODE_SIG_TYPE_V) {
-      src3 += i->src3.value->type;
+
+    if (out_src3type == OPCODE_SIG_TYPE_V) {
+      out_src3type += src3v->type;
     }
+    opcode = info->num;
+    dest = out_desttype ? OPCODE_SIG_TYPE_V + destv->type : 0;
+    src1 = out_src1type;
+    src2 = out_src2type;
+    src3 = out_src3type;
   }
 
   template <Opcode OPCODE, KeyType DEST = KEY_TYPE_X, KeyType SRC1 = KEY_TYPE_X,
             KeyType SRC2 = KEY_TYPE_X, KeyType SRC3 = KEY_TYPE_X>
   struct Construct {
-    static const uint32_t value =
+    static const InstrKeyValue value =
         (OPCODE) | (DEST << 8) | (SRC1 << 13) | (SRC2 << 18) | (SRC3 << 23);
   };
 };
@@ -284,8 +307,8 @@ struct I<OPCODE, DEST> : DestField<DEST> {
  protected:
   template <typename SEQ, typename T>
   friend struct Sequence;
-  bool Load(const Instr* i) {
-    if (InstrKey(i).value == key && BASE::LoadDest(i)) {
+  bool Load(const Instr* i, InstrKeyValue kv) {
+    if (kv == key && BASE::LoadDest(i)) {
       instr = i;
       return true;
     }
@@ -306,8 +329,8 @@ struct I<OPCODE, DEST, SRC1> : DestField<DEST> {
  protected:
   template <typename SEQ, typename T>
   friend struct Sequence;
-  bool Load(const Instr* i) {
-    if (InstrKey(i).value == key && BASE::LoadDest(i)) {
+  bool Load(const Instr* i, InstrKeyValue kv) {
+    if (kv == key && BASE::LoadDest(i)) {
       instr = i;
       src1.Load(i->src1);
       return true;
@@ -332,8 +355,8 @@ struct I<OPCODE, DEST, SRC1, SRC2> : DestField<DEST> {
  protected:
   template <typename SEQ, typename T>
   friend struct Sequence;
-  bool Load(const Instr* i) {
-    if (InstrKey(i).value == key && BASE::LoadDest(i)) {
+  bool Load(const Instr* i, InstrKeyValue kv) {
+    if (kv == key && BASE::LoadDest(i)) {
       instr = i;
       src1.Load(i->src1);
       src2.Load(i->src2);
@@ -362,8 +385,8 @@ struct I<OPCODE, DEST, SRC1, SRC2, SRC3> : DestField<DEST> {
  protected:
   template <typename SEQ, typename T>
   friend struct Sequence;
-  bool Load(const Instr* i) {
-    if (InstrKey(i).value == key && BASE::LoadDest(i)) {
+  bool Load(const Instr* i, InstrKeyValue ikey) {
+    if (ikey == key && BASE::LoadDest(i)) {
       instr = i;
       src1.Load(i->src1);
       src2.Load(i->src2);
@@ -375,21 +398,22 @@ struct I<OPCODE, DEST, SRC1, SRC2, SRC3> : DestField<DEST> {
 };
 
 template <typename T>
+XE_MAYBE_UNUSED
 static const T GetTempReg(X64Emitter& e);
 template <>
-const Reg8 GetTempReg<Reg8>(X64Emitter& e) {
+XE_MAYBE_UNUSED const Reg8 GetTempReg<Reg8>(X64Emitter& e) {
   return e.al;
 }
 template <>
-const Reg16 GetTempReg<Reg16>(X64Emitter& e) {
+XE_MAYBE_UNUSED const Reg16 GetTempReg<Reg16>(X64Emitter& e) {
   return e.ax;
 }
 template <>
-const Reg32 GetTempReg<Reg32>(X64Emitter& e) {
+XE_MAYBE_UNUSED const Reg32 GetTempReg<Reg32>(X64Emitter& e) {
   return e.eax;
 }
 template <>
-const Reg64 GetTempReg<Reg64>(X64Emitter& e) {
+XE_MAYBE_UNUSED const Reg64 GetTempReg<Reg64>(X64Emitter& e) {
   return e.rax;
 }
 
@@ -399,9 +423,9 @@ struct Sequence {
 
   static constexpr uint32_t head_key() { return T::key; }
 
-  static bool Select(X64Emitter& e, const Instr* i) {
+  static bool Select(X64Emitter& e, const Instr* i, InstrKeyValue ikey) {
     T args;
-    if (!args.Load(i)) {
+    if (!args.Load(i, ikey)) {
       return false;
     }
     SEQ::Emit(e, args);
@@ -616,7 +640,31 @@ struct Sequence {
     }
   }
 };
+template <typename T>
+static Xmm GetInputRegOrConstant(X64Emitter& e, const T& input,
+                                 Xmm xmm_to_use_if_const) {
+  if (input.is_constant) {
+    using constant_type = std::remove_reference_t<decltype(input.constant())>;
 
+    if constexpr (std::is_integral_v<constant_type>) {
+      vec128_t input_constant = vec128b(0);
+      if constexpr (sizeof(constant_type) == 4) {
+        input_constant.i32[0] = input.constant();
+
+      } else if constexpr (sizeof(constant_type) == 8) {
+        input_constant.low = input.constant();
+      } else {
+        assert_unhandled_case(sizeof(constant_type));
+      }
+      e.LoadConstantXmm(xmm_to_use_if_const, input_constant);
+    } else {
+      e.LoadConstantXmm(xmm_to_use_if_const, input.constant());
+    }
+    return xmm_to_use_if_const;
+  } else {
+    return input;
+  }
+}
 }  // namespace x64
 }  // namespace backend
 }  // namespace cpu

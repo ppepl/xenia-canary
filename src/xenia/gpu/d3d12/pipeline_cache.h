@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2018 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -21,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "xenia/base/assert.h"
 #include "xenia/base/hash.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/string_buffer.h"
@@ -31,6 +33,7 @@
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/primitive_processor.h"
 #include "xenia/gpu/register_file.h"
+#include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/d3d12/d3d12_api.h"
 
@@ -52,7 +55,10 @@ class PipelineCache {
 
   bool Initialize();
   void Shutdown();
-  void ClearCache(bool shutting_down = false);
+  // No ClearCache because it's undesirable with the persistent shader storage
+  // (if the storage is reloaded, effectively nothing is cleared, while the call
+  // takes a long time, and if it's not, there will be heavy stuttering for the
+  // rest of the execution of the guest).
 
   void InitializeShaderStorage(const std::filesystem::path& cache_root,
                                uint32_t title_id, bool blocking);
@@ -65,16 +71,20 @@ class PipelineCache {
                           const uint32_t* host_address, uint32_t dword_count);
   // Analyze shader microcode on the translator thread.
   void AnalyzeShaderUcode(Shader& shader) {
-    shader.AnalyzeUcode(ucode_disasm_buffer_);
+    if (!shader.is_ucode_analyzed()) {
+      shader.AnalyzeUcode(ucode_disasm_buffer_);
+    }
   }
 
   // Retrieves the shader modification for the current state. The shader must
   // have microcode analyzed.
   DxbcShaderTranslator::Modification GetCurrentVertexShaderModification(
       const Shader& shader,
-      Shader::HostVertexShaderType host_vertex_shader_type) const;
+      Shader::HostVertexShaderType host_vertex_shader_type,
+      uint32_t interpolator_mask) const;
   DxbcShaderTranslator::Modification GetCurrentPixelShaderModification(
-      const Shader& shader) const;
+      const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
+      reg::RB_DEPTHCONTROL normalized_depth_control) const;
 
   // If draw_util::IsRasterizationPotentiallyDone is false, the pixel shader
   // MUST be made nullptr BEFORE calling this!
@@ -82,6 +92,8 @@ class PipelineCache {
       D3D12Shader::D3D12Translation* vertex_shader,
       D3D12Shader::D3D12Translation* pixel_shader,
       const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+      reg::RB_DEPTHCONTROL normalized_depth_control,
+      uint32_t normalized_color_mask,
       uint32_t bound_depth_and_color_render_target_bits,
       const uint32_t* bound_depth_and_color_render_targets_formats,
       void** pipeline_handle_out, ID3D12RootSignature** root_signature_out);
@@ -214,6 +226,7 @@ class PipelineCache {
 
     PipelineRenderTarget render_targets[xenos::kMaxColorRenderTargets];
 
+    inline bool operator==(const PipelineDescription& other) const;
     static constexpr uint32_t kVersion = 0x20210425;
   });
 
@@ -226,7 +239,35 @@ class PipelineCache {
     ID3D12RootSignature* root_signature;
     D3D12Shader::D3D12Translation* vertex_shader;
     D3D12Shader::D3D12Translation* pixel_shader;
+    const std::vector<uint32_t>* geometry_shader;
     PipelineDescription description;
+  };
+
+  union GeometryShaderKey {
+    uint32_t key;
+    struct {
+      PipelineGeometryShader type : 2;
+      uint32_t interpolator_count : 5;
+      uint32_t user_clip_plane_count : 3;
+      uint32_t user_clip_plane_cull : 1;
+      uint32_t has_vertex_kill_and : 1;
+      uint32_t has_point_size : 1;
+      uint32_t has_point_coordinates : 1;
+    };
+
+    GeometryShaderKey() : key(0) { static_assert_size(*this, sizeof(key)); }
+
+    struct Hasher {
+      size_t operator()(const GeometryShaderKey& key) const {
+        return std::hash<uint32_t>{}(key.key);
+      }
+    };
+    bool operator==(const GeometryShaderKey& other_key) const {
+      return key == other_key.key;
+    }
+    bool operator!=(const GeometryShaderKey& other_key) const {
+      return !(*this == other_key);
+    }
   };
 
   D3D12Shader* LoadShader(xenos::ShaderType shader_type,
@@ -247,9 +288,20 @@ class PipelineCache {
       D3D12Shader::D3D12Translation* vertex_shader,
       D3D12Shader::D3D12Translation* pixel_shader,
       const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+      reg::RB_DEPTHCONTROL normalized_depth_control,
+      uint32_t normalized_color_mask,
       uint32_t bound_depth_and_color_render_target_bits,
       const uint32_t* bound_depth_and_color_render_target_formats,
       PipelineRuntimeDescription& runtime_description_out);
+
+  static bool GetGeometryShaderKey(
+      PipelineGeometryShader geometry_shader_type,
+      DxbcShaderTranslator::Modification vertex_shader_modification,
+      DxbcShaderTranslator::Modification pixel_shader_modification,
+      GeometryShaderKey& key_out);
+  static void CreateDxbcGeometryShader(GeometryShaderKey key,
+                                       std::vector<uint32_t>& shader_out);
+  const std::vector<uint32_t>& GetGeometryShader(GeometryShaderKey key);
 
   ID3D12PipelineState* CreateD3D12Pipeline(
       const PipelineRuntimeDescription& runtime_description);
@@ -295,6 +347,11 @@ class PipelineCache {
   std::unordered_multimap<uint64_t, LayoutUID,
                           xe::hash::IdentityHasher<uint64_t>>
       bindless_sampler_layout_map_;
+
+  // Geometry shaders for Xenos primitive types not supported by Direct3D 12.
+  std::unordered_map<GeometryShaderKey, std::vector<uint32_t>,
+                     GeometryShaderKey::Hasher>
+      geometry_shaders_;
 
   // Empty depth-only pixel shader for writing to depth buffer via ROV when no
   // Xenos pixel shader provided.
@@ -346,8 +403,8 @@ class PipelineCache {
   // Pipeline creation threads.
   void CreationThread(size_t thread_index);
   void CreateQueuedPipelinesOnProcessorThread();
-  std::mutex creation_request_lock_;
-  std::condition_variable creation_request_cond_;
+  xe_mutex creation_request_lock_;
+  std::condition_variable_any creation_request_cond_;
   // Protected with creation_request_lock_, notify_one creation_request_cond_
   // when set.
   std::deque<Pipeline*> creation_queue_;
@@ -368,7 +425,34 @@ class PipelineCache {
   size_t creation_threads_shutdown_from_ = SIZE_MAX;
   std::vector<std::unique_ptr<xe::threading::Thread>> creation_threads_;
 };
+inline bool PipelineCache::PipelineDescription::operator==(
+    const PipelineDescription& other) const {
+  constexpr size_t cmp_size = sizeof(PipelineDescription);
+#if XE_ARCH_AMD64 == 1
+  if constexpr (cmp_size == 64) {
+    if (vertex_shader_hash != other.vertex_shader_hash ||
+        vertex_shader_modification != other.vertex_shader_modification) {
+      return false;
+    }
+    const __m128i* thiz = (const __m128i*)this;
+    const __m128i* thoze = (const __m128i*)&other;
+    __m128i cmp32 =
+        _mm_cmpeq_epi8(_mm_loadu_si128(thiz + 1), _mm_loadu_si128(thoze + 1));
 
+    cmp32 = _mm_and_si128(cmp32, _mm_cmpeq_epi8(_mm_loadu_si128(thiz + 2),
+                                                _mm_loadu_si128(thoze + 2)));
+
+    cmp32 = _mm_and_si128(cmp32, _mm_cmpeq_epi8(_mm_loadu_si128(thiz + 3),
+                                                _mm_loadu_si128(thoze + 3)));
+
+    return _mm_movemask_epi8(cmp32) == 0xFFFF;
+
+  } else
+#endif
+  {
+    return !memcmp(this, &other, cmp_size);
+  }
+}
 }  // namespace d3d12
 }  // namespace gpu
 }  // namespace xe

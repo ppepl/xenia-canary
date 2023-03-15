@@ -10,10 +10,12 @@ project("xenia-cpu-ppc-tests")
     "capstone", -- cpu-backend-x64
     "fmt",
     "mspack",
+    "imgui",
     "xenia-core",
-    "xenia-cpu-backend-x64",
     "xenia-cpu",
     "xenia-base",
+    "xenia-kernel",
+    "xenia-patcher",
   })
   files({
     "ppc_testing_main.cc",
@@ -24,6 +26,10 @@ project("xenia-cpu-ppc-tests")
   })
   filter("files:*.s")
     flags({"ExcludeFromBuild"})
+  filter("architecture:x86_64")
+    links({
+      "xenia-cpu-backend-x64",
+    })
   filter("platforms:Windows")
     debugdir(project_root)
     debugargs({

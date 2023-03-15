@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -14,6 +14,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
@@ -32,14 +33,23 @@ DEFINE_bool(ignore_thread_priorities, true,
 DEFINE_bool(ignore_thread_affinities, true,
             "Ignores game-specified thread affinities.", "Kernel");
 
+
+#if 0
+DEFINE_int64(stack_size_multiplier_hack, 1,
+             "A hack for games with setjmp/longjmp issues.", "Kernel");
+DEFINE_int64(main_xthread_stack_size_multiplier_hack, 1,
+             "A hack for games with setjmp/longjmp issues.", "Kernel");
+#endif
 namespace xe {
-namespace kernel {
+  namespace kernel {
 
 const uint32_t XAPC::kSize;
 const uint32_t XAPC::kDummyKernelRoutine;
 const uint32_t XAPC::kDummyRundownRoutine;
 
 using xe::cpu::ppc::PPCOpcode;
+
+using namespace xe::literals;
 
 uint32_t next_xthread_id_ = 0;
 
@@ -50,7 +60,7 @@ XThread::XThread(KernelState* kernel_state, uint32_t stack_size,
                  uint32_t xapi_thread_startup, uint32_t start_address,
                  uint32_t start_context, uint32_t creation_flags,
                  bool guest_thread, bool main_thread)
-    : XObject(kernel_state, kObjectType),
+    : XObject(kernel_state, kObjectType, !guest_thread),
       thread_id_(++next_xthread_id_),
       guest_thread_(guest_thread),
       main_thread_(main_thread),
@@ -67,10 +77,6 @@ XThread::XThread(KernelState* kernel_state, uint32_t stack_size,
   // Adjust stack size - min of 16k.
   if (creation_params_.stack_size < 16 * 1024) {
     creation_params_.stack_size = 16 * 1024;
-  }
-
-  if (!guest_thread_) {
-    host_object_ = true;
   }
 
   // The kernel does not take a reference. We must unregister in the dtor.
@@ -370,8 +376,23 @@ X_STATUS XThread::Create() {
   RetainHandle();
 
   xe::threading::Thread::CreationParameters params;
-  params.stack_size = 16 * 1024 * 1024;  // Allocate a big host stack.
+  
+
+
   params.create_suspended = true;
+
+  #if 0
+  uint64_t stack_size_mult = cvars::stack_size_multiplier_hack;
+  
+  if (main_thread_) {
+    stack_size_mult =
+        static_cast<uint64_t>(cvars::main_xthread_stack_size_multiplier_hack);
+
+  } 
+  #else
+  uint64_t stack_size_mult = 1;
+  #endif
+  params.stack_size = 16_MiB * stack_size_mult;  // Allocate a big host stack.
   thread_ = xe::threading::Thread::Create(params, [this]() {
     // Set thread ID override. This is used by logging.
     xe::threading::set_current_thread_id(handle());
@@ -430,6 +451,9 @@ X_STATUS XThread::Create() {
 X_STATUS XThread::Exit(int exit_code) {
   // This may only be called on the thread itself.
   assert_true(XThread::GetCurrentThread() == this);
+  //TODO(chrispy): not sure if this order is correct, should it come after apcs?
+  guest_object<X_KTHREAD>()->terminated = 1;
+ 
 
   // TODO(benvanik): dispatch events? waiters? etc?
   RundownAPCs();
@@ -714,6 +738,9 @@ void XThread::RundownAPCs() {
 int32_t XThread::QueryPriority() { return thread_->priority(); }
 
 void XThread::SetPriority(int32_t increment) {
+  if (is_guest_thread()) {
+    guest_object<X_KTHREAD>()->priority = static_cast<uint8_t>(increment);
+  }
   priority_ = increment;
   int32_t target_priority = 0;
   if (increment > 0x22) {
@@ -760,7 +787,8 @@ void XThread::SetActiveCpu(uint8_t cpu_index) {
       thread_->set_affinity_mask(uint64_t(1) << cpu_index);
     }
   } else {
-    XELOGW("Too few processor cores - scheduling will be wonky");
+	  //there no good reason why we need to log this... we don't perfectly emulate the 360's scheduler in any way
+   // XELOGW("Too few processor cores - scheduling will be wonky");
   }
 }
 
@@ -1018,7 +1046,7 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
 
     xe::threading::Thread::CreationParameters params;
     params.create_suspended = true;  // Not done restoring yet.
-    params.stack_size = 16 * 1024 * 1024;
+    params.stack_size = 16_MiB;
     thread->thread_ = xe::threading::Thread::Create(params, [thread, state]() {
       // Set thread ID override. This is used by logging.
       xe::threading::set_current_thread_id(thread->handle());
@@ -1054,6 +1082,7 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
       // Release the self-reference to the thread.
       thread->ReleaseHandle();
     });
+    assert_not_null(thread->thread_);
 
     // Notify processor we were recreated.
     thread->emulator()->processor()->OnThreadCreated(

@@ -38,7 +38,7 @@ class UserModule : public XModule {
 
   const std::string& path() const override { return path_; }
   const std::string& name() const override { return name_; }
-  const uint64_t hash() const { return hash_; }
+  std::optional<uint64_t> hash() const { return hash_; }
 
   enum ModuleFormat {
     kModuleFormatUndefined = 0,
@@ -59,14 +59,19 @@ class UserModule : public XModule {
   uint32_t guest_xex_header() const { return guest_xex_header_; }
   // The title ID in the xex header or 0 if this is not a xex.
   uint32_t title_id() const;
+  uint32_t disc_number() const;
+  bool is_multi_disc_title() const;
+
   bool is_executable() const { return processor_module_->is_executable(); }
   bool is_dll_module() const { return is_dll_module_; }
 
   uint32_t entry_point() const { return entry_point_; }
   uint32_t stack_size() const { return stack_size_; }
+  uint32_t workspace_size() const { return workspace_size_; }
 
   X_STATUS LoadFromFile(const std::string_view path);
   X_STATUS LoadFromMemory(const void* addr, const size_t length);
+  X_STATUS LoadContinue();
   X_STATUS Unload();
 
   uint32_t GetProcAddressByOrdinal(uint16_t ordinal) override;
@@ -97,11 +102,11 @@ class UserModule : public XModule {
                                         const std::string_view path);
 
  private:
-  X_STATUS LoadXexContinue();
+  void CalculateHash();
 
   std::string name_;
   std::string path_;
-  uint64_t hash_;
+  std::optional<uint64_t> hash_ = std::nullopt;
 
   uint32_t guest_xex_header_ = 0;
   ModuleFormat module_format_ = kModuleFormatUndefined;
@@ -109,6 +114,7 @@ class UserModule : public XModule {
   bool is_dll_module_ = false;
   uint32_t entry_point_ = 0;
   uint32_t stack_size_ = 0;
+  uint32_t workspace_size_ = 384*1024;
 };
 
 }  // namespace kernel

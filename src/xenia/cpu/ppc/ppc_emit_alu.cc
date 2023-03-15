@@ -30,9 +30,11 @@ Value* AddDidCarry(PPCHIRBuilder& f, Value* v1, Value* v2) {
 }
 
 Value* SubDidCarry(PPCHIRBuilder& f, Value* v1, Value* v2) {
+  Value* trunc_v2 = f.Truncate(v2, INT32_TYPE);
+
   return f.Or(f.CompareUGT(f.Truncate(v1, INT32_TYPE),
-                           f.Not(f.Neg(f.Truncate(v2, INT32_TYPE)))),
-              f.IsFalse(f.Truncate(v2, INT32_TYPE)));
+                           f.Sub(trunc_v2, f.LoadConstantInt32(1))),
+              f.IsFalse(trunc_v2));
 }
 
 // https://github.com/sebastianbiallas/pearpc/blob/0b3c823f61456faa677f6209545a7b906e797421/src/cpu/cpu_generic/ppc_tools.h#L26
@@ -50,7 +52,7 @@ int InstrEmit_addx(PPCHIRBuilder& f, const InstrData& i) {
   Value* v = f.Add(f.LoadGPR(i.XO.RA), f.LoadGPR(i.XO.RB));
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.OE) {
-    assert_always();
+    XEINSTRNOTIMPLEMENTED();
     // e.update_xer_with_overflow(EFLAGS OF?);
   }
   if (i.XO.Rc) {
@@ -67,7 +69,7 @@ int InstrEmit_addcx(PPCHIRBuilder& f, const InstrData& i) {
   Value* v = f.Add(ra, rb);
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.OE) {
-    assert_always();
+    XEINSTRNOTIMPLEMENTED();
     // e.update_xer_with_overflow(EFLAGS OF?);
   } else {
     f.StoreCA(AddDidCarry(f, ra, rb));
@@ -85,14 +87,15 @@ int InstrEmit_addex(PPCHIRBuilder& f, const InstrData& i) {
   Value* rb = f.LoadGPR(i.XO.RB);
   Value* v = f.AddWithCarry(ra, rb, f.LoadCA());
   f.StoreGPR(i.XO.RT, v);
-  if (i.XO.OE) {
-    assert_always();
-    // e.update_xer_with_overflow(EFLAGS OF?);
-  } else {
-    f.StoreCA(AddWithCarryDidCarry(f, ra, rb, f.LoadCA()));
-  }
+  f.StoreCA(AddWithCarryDidCarry(f, ra, rb, f.LoadCA()));
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
+  }
+  if (i.XO.OE) {
+    // Stub implementation.
+    // TODO: Handle overflow flag.
+    // NOTE: 535507D4 (Raiden Fighters Aces) never seems to rely on this
+    //   behavior either, despite OE being set.
   }
   return 0;
 }
@@ -155,7 +158,7 @@ int InstrEmit_addmex(PPCHIRBuilder& f, const InstrData& i) {
   if (i.XO.OE) {
     // With XER[SO] update too.
     // e.update_xer_with_overflow_and_carry(b.CreateExtractValue(v, 1));
-    assert_always();
+    XEINSTRNOTIMPLEMENTED();
   } else {
     // Just CA update.
     f.StoreCA(AddWithCarryDidCarry(f, ra, f.LoadConstantInt64(-1), f.LoadCA()));
@@ -175,7 +178,7 @@ int InstrEmit_addzex(PPCHIRBuilder& f, const InstrData& i) {
   if (i.XO.OE) {
     // With XER[SO] update too.
     // e.update_xer_with_overflow_and_carry(b.CreateExtractValue(v, 1));
-    assert_always();
+    XEINSTRNOTIMPLEMENTED();
     return 1;
   } else {
     // Just CA update.
@@ -204,7 +207,7 @@ int InstrEmit_divdx(PPCHIRBuilder& f, const InstrData& i) {
   if (i.XO.OE) {
     // If we are OE=1 we need to clear the overflow bit.
     // e.update_xer_with_overflow(e.get_uint64(0));
-    assert_always();
+    XEINSTRNOTIMPLEMENTED();
     return 1;
   }
   if (i.XO.Rc) {
@@ -230,7 +233,7 @@ int InstrEmit_divdux(PPCHIRBuilder& f, const InstrData& i) {
   if (i.XO.OE) {
     // If we are OE=1 we need to clear the overflow bit.
     // e.update_xer_with_overflow(e.get_uint64(0));
-    assert_always();
+    XEINSTRNOTIMPLEMENTED();
     return 1;
   }
   if (i.XO.Rc) {
@@ -258,7 +261,7 @@ int InstrEmit_divwx(PPCHIRBuilder& f, const InstrData& i) {
   if (i.XO.OE) {
     // If we are OE=1 we need to clear the overflow bit.
     // e.update_xer_with_overflow(e.get_uint64(0));
-    assert_always();
+    XEINSTRNOTIMPLEMENTED();
     return 1;
   }
   if (i.XO.Rc) {
@@ -287,7 +290,7 @@ int InstrEmit_divwux(PPCHIRBuilder& f, const InstrData& i) {
   if (i.XO.OE) {
     // If we are OE=1 we need to clear the overflow bit.
     // e.update_xer_with_overflow(e.get_uint64(0));
-    assert_always();
+    XEINSTRNOTIMPLEMENTED();
     return 1;
   }
   if (i.XO.Rc) {
@@ -334,9 +337,14 @@ int InstrEmit_mulhwx(PPCHIRBuilder& f, const InstrData& i) {
     XEINSTRNOTIMPLEMENTED();
     return 1;
   }
-  Value* v = f.SignExtend(f.MulHi(f.Truncate(f.LoadGPR(i.XO.RA), INT32_TYPE),
-                                  f.Truncate(f.LoadGPR(i.XO.RB), INT32_TYPE)),
-                          INT64_TYPE);
+  Value* ratrunc =
+      f.SignExtend(f.Truncate(f.LoadGPR(i.XO.RA), INT32_TYPE), INT64_TYPE);
+
+  Value* rbtrunc =
+      f.SignExtend(f.Truncate(f.LoadGPR(i.XO.RB), INT32_TYPE), INT64_TYPE);
+
+  Value* v = f.Sha(f.Mul(ratrunc, rbtrunc), 32);
+
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
@@ -351,10 +359,14 @@ int InstrEmit_mulhwux(PPCHIRBuilder& f, const InstrData& i) {
     XEINSTRNOTIMPLEMENTED();
     return 1;
   }
-  Value* v = f.ZeroExtend(
-      f.MulHi(f.Truncate(f.LoadGPR(i.XO.RA), INT32_TYPE),
-              f.Truncate(f.LoadGPR(i.XO.RB), INT32_TYPE), ARITHMETIC_UNSIGNED),
-      INT64_TYPE);
+
+  Value* ratrunc =
+      f.ZeroExtend(f.Truncate(f.LoadGPR(i.XO.RA), INT32_TYPE), INT64_TYPE);
+
+  Value* rbtrunc =
+      f.ZeroExtend(f.Truncate(f.LoadGPR(i.XO.RB), INT32_TYPE), INT64_TYPE);
+
+  Value* v = f.Shr(f.Mul(ratrunc, rbtrunc, ARITHMETIC_UNSIGNED), 32);
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
@@ -405,32 +417,20 @@ int InstrEmit_mullwx(PPCHIRBuilder& f, const InstrData& i) {
 int InstrEmit_negx(PPCHIRBuilder& f, const InstrData& i) {
   // RT <- ¬(RA) + 1
   if (i.XO.OE) {
-    // With XER update.
-    // This is a different codepath as we need to use llvm.ssub.with.overflow.
-
-    // if RA == 0x8000000000000000 then no-op and set OV=1
-    // This may just magically do that...
-
-    assert_always();
-    // Function* ssub_with_overflow = Intrinsic::getDeclaration(
-    //    e.gen_module(), Intrinsic::ssub_with_overflow, jit_type_nint);
-    // jit_value_t v = b.CreateCall2(ssub_with_overflow,
-    //                         e.get_int64(0), f.LoadGPR(i.XO.RA));
-    // jit_value_t v0 = b.CreateExtractValue(v, 0);
-    // f.StoreGPR(i.XO.RT, v0);
-    // e.update_xer_with_overflow(b.CreateExtractValue(v, 1));
-
-    // if (i.XO.Rc) {
-    //  // With cr0 update.
-    //  f.UpdateCR(0, v0, e.get_int64(0), true);
-    //}
-  } else {
-    // No OE bit setting.
-    Value* v = f.Neg(f.LoadGPR(i.XO.RA));
-    f.StoreGPR(i.XO.RT, v);
-    if (i.XO.Rc) {
-      f.UpdateCR(0, v);
+    // Stub implementation.
+    // TODO: Handle overflow flag for XER.
+    // NOTE: 535507D4 (Raiden Fighters Aces) never seems to rely on this
+    //   behavior, despite having OE set.
+    Value* v = f.LoadGPR(i.XO.RA);
+    if (v->AsUint64() == 0x8000000000000000) {
+      f.StoreGPR(i.XO.RT, v);
+      return 0;
     }
+  }
+  Value* v = f.Neg(f.LoadGPR(i.XO.RA));
+  f.StoreGPR(i.XO.RT, v);
+  if (i.XO.Rc) {
+    f.UpdateCR(0, v);
   }
   return 0;
 }
@@ -440,7 +440,8 @@ int InstrEmit_subfx(PPCHIRBuilder& f, const InstrData& i) {
   Value* v = f.Sub(f.LoadGPR(i.XO.RB), f.LoadGPR(i.XO.RA));
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.OE) {
-    assert_always();
+    XEINSTRNOTIMPLEMENTED();
+    return 1;
     // e.update_xer_with_overflow(EFLAGS??);
   }
   if (i.XO.Rc) {
@@ -456,7 +457,8 @@ int InstrEmit_subfcx(PPCHIRBuilder& f, const InstrData& i) {
   Value* v = f.Sub(rb, ra);
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.OE) {
-    assert_always();
+    XEINSTRNOTIMPLEMENTED();
+    return 1;
     // e.update_xer_with_overflow(EFLAGS??);
   } else {
     f.StoreCA(SubDidCarry(f, rb, ra));
@@ -483,7 +485,8 @@ int InstrEmit_subfex(PPCHIRBuilder& f, const InstrData& i) {
   Value* v = f.AddWithCarry(not_ra, rb, f.LoadCA());
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.OE) {
-    assert_always();
+    XEINSTRNOTIMPLEMENTED();
+    return 1;
     // e.update_xer_with_overflow_and_carry(b.CreateExtractValue(v, 1));
   } else {
     f.StoreCA(AddWithCarryDidCarry(f, not_ra, rb, f.LoadCA()));
@@ -500,7 +503,8 @@ int InstrEmit_subfmex(PPCHIRBuilder& f, const InstrData& i) {
   Value* v = f.AddWithCarry(not_ra, f.LoadConstantInt64(-1), f.LoadCA());
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.OE) {
-    assert_always();
+    XEINSTRNOTIMPLEMENTED();
+    return 1;
     // e.update_xer_with_overflow_and_carry(b.CreateExtractValue(v, 1));
   } else {
     f.StoreCA(
@@ -518,7 +522,8 @@ int InstrEmit_subfzex(PPCHIRBuilder& f, const InstrData& i) {
   Value* v = f.AddWithCarry(not_ra, f.LoadZeroInt64(), f.LoadCA());
   f.StoreGPR(i.XO.RT, v);
   if (i.XO.OE) {
-    assert_always();
+    XEINSTRNOTIMPLEMENTED();
+    return 1;
     // e.update_xer_with_overflow_and_carry(b.CreateExtractValue(v, 1));
   } else {
     f.StoreCA(AddWithCarryDidCarry(f, not_ra, f.LoadZeroInt64(), f.LoadCA()));
@@ -657,7 +662,7 @@ int InstrEmit_andx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_andcx(PPCHIRBuilder& f, const InstrData& i) {
   // RA <- (RS) & ¬(RB)
-  Value* ra = f.And(f.LoadGPR(i.X.RT), f.Not(f.LoadGPR(i.X.RB)));
+  Value* ra = f.AndNot(f.LoadGPR(i.X.RT), f.LoadGPR(i.X.RB));
   f.StoreGPR(i.X.RA, ra);
   if (i.X.Rc) {
     f.UpdateCR(0, ra);
@@ -784,8 +789,15 @@ int InstrEmit_norx(PPCHIRBuilder& f, const InstrData& i) {
 int InstrEmit_orx(PPCHIRBuilder& f, const InstrData& i) {
   // RA <- (RS) | (RB)
   if (i.X.RT == i.X.RB && i.X.RT == i.X.RA && !i.X.Rc) {
-    // Sometimes used as no-op.
-    f.Nop();
+    // chrispy: this special version of orx is db16cyc and is heavily used in
+    // spinlocks. since we do not emit any code for this we end up wasting a ton
+    // of power
+    if (i.code == 0x7FFFFB78) {
+      f.DelayExecution();
+    } else {
+      // Sometimes used as no-op.
+      f.Nop();
+    }
     return 0;
   }
   Value* ra;
@@ -908,8 +920,26 @@ int InstrEmit_rldcrx(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_rldicx(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // n <- sh[5] || sh[0:4]
+  // r <- ROTL64(RS, n)
+  // b <- mb[5] || mb[0:4]
+  // m <- MASK(b, ~n)
+  // RA <- r & m
+  // TODO: Check if this makes any sense. It works in 535507D4,
+  //   but it's the only title I could find that uses this instruction.
+  uint32_t sh = (i.MD.SH5 << 5) | i.MD.SH;
+  uint32_t mb = (i.MD.MB5 << 5) | i.MD.MB;
+  uint64_t m = XEMASK(mb, ~sh);
+  Value* v = f.LoadGPR(i.MD.RT);
+  if (sh) {
+    v = f.RotateLeft(v, f.LoadConstantInt8(sh));
+  }
+  v = f.And(v, f.LoadConstantUint64(m));
+  f.StoreGPR(i.MD.RA, v);
+  if (i.MD.Rc) {
+    f.UpdateCR(0, v);
+  }
+  return 0;
 }
 
 int InstrEmit_rldiclx(PPCHIRBuilder& f, const InstrData& i) {
@@ -1017,6 +1047,17 @@ int InstrEmit_rlwimix(PPCHIRBuilder& f, const InstrData& i) {
   }
   return 0;
 }
+static bool InstrCheck_rlx_only_needs_low(unsigned rotation, uint64_t mask) {
+  uint32_t mask32 = static_cast<uint32_t>(mask);
+  if (static_cast<uint64_t>(mask32) != mask) {
+    return false;
+  }
+  uint32_t all_ones_32 = ~0U;
+  all_ones_32 <<= rotation;
+
+  return all_ones_32 == mask32;  // mask is only 32 bits and all bits from the
+                                 // rotation are discarded
+}
 
 int InstrEmit_rlwinmx(PPCHIRBuilder& f, const InstrData& i) {
   // n <- SH
@@ -1025,22 +1066,46 @@ int InstrEmit_rlwinmx(PPCHIRBuilder& f, const InstrData& i) {
   // RA <- r & m
   Value* v = f.LoadGPR(i.M.RT);
 
-  // (x||x)
-  v = f.Or(f.Shl(v, 32), f.ZeroExtend(f.Truncate(v, INT32_TYPE), INT64_TYPE));
+  unsigned rotation = i.M.SH;
 
-  // TODO(benvanik): optimize srwi
-  // TODO(benvanik): optimize slwi
-  // The compiler will generate a bunch of these for the special case of SH=0.
-  // Which seems to just select some bits and set cr0 for use with a branch.
-  // We can detect this and do less work.
-  if (i.M.SH) {
-    v = f.RotateLeft(v, f.LoadConstantInt8(i.M.SH));
-  }
-  // Compiler sometimes masks with 0xFFFFFFFF (identity) - avoid the work here
-  // as our truncation/zero-extend does it for us.
   uint64_t m = XEMASK(i.M.MB + 32, i.M.ME + 32);
-  if (m != 0xFFFFFFFFFFFFFFFFull) {
+
+  // in uint32 range (so no register concat/truncate/zx needed) and no rotation
+  if (m < (1ULL << 32) && (rotation == 0)) {
     v = f.And(v, f.LoadConstantUint64(m));
+  }
+  // masks out all the bits that are rotated in from the right, so just do a
+  // shift + and. the and with 0xFFFFFFFF is done instead of a truncate/zx
+  // because we have a special case for it in the emitters that will just do a
+  // single insn (mov reg32, lowpartofreg64), otherwise we generate
+  // significantly more code from setting up the opnds of the truncate/zx
+  else if (InstrCheck_rlx_only_needs_low(rotation, m)) {
+    // this path is taken for like 90% of all rlwinms
+    v = f.And(f.Shl(v, rotation), f.LoadConstantUint64(0xFFFFFFFF));
+  }
+
+  else {
+    // (x||x)
+    // cs: changed this to mask with UINT32_MAX instead of doing the
+    // truncate/extend, this generates better code in the backend and is easier
+    // to do analysis on
+    v = f.And(v, f.LoadConstantUint64(0xFFFFFFFF));
+
+    v = f.Or(f.Shl(v, 32), v);
+
+    // TODO(benvanik): optimize srwi
+    // TODO(benvanik): optimize slwi
+    // The compiler will generate a bunch of these for the special case of SH=0.
+    // Which seems to just select some bits and set cr0 for use with a branch.
+    // We can detect this and do less work.
+    if (i.M.SH) {
+      v = f.RotateLeft(v, f.LoadConstantInt8(rotation));
+    }
+    // Compiler sometimes masks with 0xFFFFFFFF (identity) - avoid the work here
+    // as our truncation/zero-extend does it for us.
+    if (m != 0xFFFFFFFFFFFFFFFFull) {
+      v = f.And(v, f.LoadConstantUint64(m));
+    }
   }
   f.StoreGPR(i.M.RA, v);
   if (i.M.Rc) {
@@ -1258,8 +1323,15 @@ int InstrEmit_srawix(PPCHIRBuilder& f, const InstrData& i) {
     // CA is set if any bits are shifted out of the right and if the result
     // is negative.
     uint32_t mask = (uint32_t)XEMASK(64 - i.X.RB, 63);
-    ca = f.And(f.Truncate(f.Shr(v, 31), INT8_TYPE),
-               f.IsTrue(f.And(v, f.LoadConstantUint32(mask))));
+
+    if (mask == 1) {
+      ca = f.And(f.CompareSLT(v, f.LoadConstantInt32(0)),
+                 f.Truncate(v, INT8_TYPE));
+
+    } else {
+      ca = f.And(f.CompareSLT(v, f.LoadConstantInt32(0)),
+                 f.IsTrue(f.And(v, f.LoadConstantUint32(mask))));
+    }
 
     v = f.Sha(v, (int8_t)i.X.RB), v = f.SignExtend(v, INT64_TYPE);
   }

@@ -11,9 +11,11 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/reset_scope.h"
+#include "xenia/base/string.h"
 #include "xenia/cpu/compiler/compiler_passes.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/ppc/ppc_frontend.h"
@@ -21,6 +23,10 @@
 #include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/ppc/ppc_scanner.h"
 #include "xenia/cpu/processor.h"
+#include "xenia/cpu/xex_module.h"
+
+DEFINE_bool(dump_translated_hir_functions, false, "dumps translated hir",
+            "CPU");
 
 namespace xe {
 namespace cpu {
@@ -95,10 +101,59 @@ PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
 
 PPCTranslator::~PPCTranslator() = default;
 
+class HirBuilderScope {
+  PPCHIRBuilder* builder_;
+
+ public:
+  HirBuilderScope(PPCHIRBuilder* builder) : builder_(builder) {
+    builder_->MakeCurrent();
+  }
+
+  ~HirBuilderScope() {
+    if (builder_) {
+      builder_->RemoveCurrent();
+    }
+  }
+};
+void PPCTranslator::DumpHIR(GuestFunction* function, PPCHIRBuilder* builder) {
+  if (cvars::dump_translated_hir_functions) {
+    StringBuffer buffer{};
+    builder_->Dump(&buffer);
+
+    XexModule* mod = dynamic_cast<XexModule*>(function->module());
+
+    std::wstring folder_name = L"hirdump";
+
+    if (mod) {
+      xex2_opt_execution_info* opt_exec_info = nullptr;
+      if (mod->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &opt_exec_info)) {
+        folder_name =
+            L"hirdump_title_" + std::to_wstring(opt_exec_info->title_id);
+      }
+    }
+    std::filesystem::path folder_path{folder_name};
+
+    if (!std::filesystem::exists(folder_path)) {
+      std::filesystem::create_directory(folder_path);
+    }
+
+    {
+      wchar_t tmpbuf[64];
+      _snwprintf(tmpbuf, 64, L"%X", function->address());
+      folder_path.append(&tmpbuf[0]);
+    }
+
+    FILE* f = fopen(folder_path.generic_u8string().c_str(), "w");
+    if (f) {
+      fputs(buffer.buffer(), f);
+      fclose(f);
+    }
+  }
+}
 bool PPCTranslator::Translate(GuestFunction* function,
                               uint32_t debug_info_flags) {
   SCOPE_profile_cpu_f("cpu");
-
+  HirBuilderScope hir_build_scope{builder_.get()};
   // Reset() all caching when we leave.
   xe::make_reset_scope(builder_);
   xe::make_reset_scope(compiler_);
@@ -155,7 +210,7 @@ bool PPCTranslator::Translate(GuestFunction* function,
   // Stash source.
   if (debug_info_flags & DebugInfoFlags::kDebugInfoDisasmSource) {
     DumpSource(function, &string_buffer_);
-    debug_info->set_source_disasm(strdup(string_buffer_.buffer()));
+    debug_info->set_source_disasm(xe_strdup(string_buffer_.buffer()));
     string_buffer_.Reset();
   }
 
@@ -171,7 +226,7 @@ bool PPCTranslator::Translate(GuestFunction* function,
   // Stash raw HIR.
   if (debug_info_flags & DebugInfoFlags::kDebugInfoDisasmRawHir) {
     builder_->Dump(&string_buffer_);
-    debug_info->set_raw_hir_disasm(strdup(string_buffer_.buffer()));
+    debug_info->set_raw_hir_disasm(xe_strdup(string_buffer_.buffer()));
     string_buffer_.Reset();
   }
 
@@ -183,9 +238,11 @@ bool PPCTranslator::Translate(GuestFunction* function,
   // Stash optimized HIR.
   if (debug_info_flags & DebugInfoFlags::kDebugInfoDisasmHir) {
     builder_->Dump(&string_buffer_);
-    debug_info->set_hir_disasm(strdup(string_buffer_.buffer()));
+    debug_info->set_hir_disasm(xe_strdup(string_buffer_.buffer()));
     string_buffer_.Reset();
   }
+
+  DumpHIR(function, builder_.get());
 
   // Assemble to backend machine code.
   if (!assembler_->Assemble(function, builder_.get(), debug_info_flags,
@@ -195,7 +252,7 @@ bool PPCTranslator::Translate(GuestFunction* function,
 
   return true;
 }
-
+void PPCTranslator::Reset() { builder_->ResetPools(); }
 void PPCTranslator::DumpSource(GuestFunction* function,
                                StringBuffer* string_buffer) {
   Memory* memory = frontend_->memory();

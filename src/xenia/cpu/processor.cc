@@ -16,8 +16,10 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/debugging.h"
 #include "xenia/base/exception_handler.h"
+#include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
+#include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/threading.h"
 #include "xenia/cpu/breakpoint.h"
@@ -56,6 +58,8 @@ namespace cpu {
 
 using xe::cpu::ppc::PPCOpcode;
 using xe::kernel::XThread;
+
+using namespace xe::literals;
 
 class BuiltinModule : public Module {
  public:
@@ -130,7 +134,11 @@ bool Processor::Setup(std::unique_ptr<backend::Backend> backend) {
   // Stack walker is used when profiling, debugging, and dumping.
   // Note that creation may fail, in which case we'll have to disable those
   // features.
-  stack_walker_ = StackWalker::Create(backend_->code_cache());
+  // The code cache may be unavailable in case of a "null" backend.
+  cpu::backend::CodeCache* code_cache = backend_->code_cache();
+  if (code_cache) {
+    stack_walker_ = StackWalker::Create(code_cache);
+  }
   if (!stack_walker_) {
     // TODO(benvanik): disable features.
     if (cvars::debug) {
@@ -142,8 +150,8 @@ bool Processor::Setup(std::unique_ptr<backend::Backend> backend) {
   // Open the trace data path, if requested.
   functions_trace_path_ = cvars::trace_function_data_path;
   if (!functions_trace_path_.empty()) {
-    functions_trace_file_ = ChunkedMappedMemoryWriter::Open(
-        functions_trace_path_, 32 * 1024 * 1024, true);
+    functions_trace_file_ =
+        ChunkedMappedMemoryWriter::Open(functions_trace_path_, 32_MiB, true);
   }
 
   return true;
@@ -165,6 +173,27 @@ bool Processor::AddModule(std::unique_ptr<Module> module) {
   auto global_lock = global_critical_region_.Acquire();
   modules_.push_back(std::move(module));
   return true;
+}
+
+void Processor::RemoveModule(const std::string_view name) {
+  auto global_lock = global_critical_region_.Acquire();
+
+  auto itr =
+      std::find_if(modules_.cbegin(), modules_.cend(),
+                   [name](std::unique_ptr<xe::cpu::Module> const& module) {
+                     return module->name() == name;
+                   });
+
+  if (itr != modules_.cend()) {
+    const std::vector<uint32_t> addressed_functions =
+        (*itr)->GetAddressedFunctions();
+
+    modules_.erase(itr);
+
+    for (const uint32_t entry : addressed_functions) {
+      RemoveFunctionByAddress(entry);
+    }
+  }
 }
 
 Module* Processor::GetModule(const std::string_view name) {
@@ -216,6 +245,10 @@ std::vector<Function*> Processor::FindFunctionsWithAddress(uint32_t address) {
   return entry_table_.FindWithAddress(address);
 }
 
+void Processor::RemoveFunctionByAddress(uint32_t address) {
+  entry_table_.Delete(address);
+}
+
 Function* Processor::ResolveFunction(uint32_t address) {
   Entry* entry;
   Entry::Status status = entry_table_.GetOrCreate(address, &entry);
@@ -224,6 +257,7 @@ Function* Processor::ResolveFunction(uint32_t address) {
 
     // Grab symbol declaration.
     auto function = LookupFunction(address);
+
     if (!function) {
       entry->status = Entry::STATUS_FAILED;
       return nullptr;
@@ -233,6 +267,17 @@ Function* Processor::ResolveFunction(uint32_t address) {
       entry->status = Entry::STATUS_FAILED;
       return nullptr;
     }
+    //only add it to the list of resolved functions if resolving succeeded
+    auto module_for = function->module();
+
+    auto xexmod = dynamic_cast<XexModule*>(module_for);
+    if (xexmod) {
+      auto addr_flags = xexmod->GetInstructionAddressFlags(address);
+      if (addr_flags) {
+        addr_flags->was_resolved = 1;
+      }
+    }
+
     entry->function = function;
     entry->end_address = function->end_address();
     status = entry->status = Entry::STATUS_READY;
@@ -245,23 +290,23 @@ Function* Processor::ResolveFunction(uint32_t address) {
     return nullptr;
   }
 }
-
+Module* Processor::LookupModule(uint32_t address) {
+  auto global_lock = global_critical_region_.Acquire();
+  // TODO(benvanik): sort by code address (if contiguous) so can bsearch.
+  // TODO(benvanik): cache last module low/high, as likely to be in there.
+  for (const auto& module : modules_) {
+    if (module->ContainsAddress(address)) {
+      return module.get();
+    }
+  }
+  return nullptr;
+}
 Function* Processor::LookupFunction(uint32_t address) {
   // TODO(benvanik): fast reject invalid addresses/log errors.
 
   // Find the module that contains the address.
-  Module* code_module = nullptr;
-  {
-    auto global_lock = global_critical_region_.Acquire();
-    // TODO(benvanik): sort by code address (if contiguous) so can bsearch.
-    // TODO(benvanik): cache last module low/high, as likely to be in there.
-    for (const auto& module : modules_) {
-      if (module->ContainsAddress(address)) {
-        code_module = module.get();
-        break;
-      }
-    }
-  }
+  Module* code_module = LookupModule(address);
+
   if (!code_module) {
     // No module found that could contain the address.
     return nullptr;
@@ -500,9 +545,7 @@ void Processor::OnThreadDestroyed(uint32_t thread_id) {
   auto global_lock = global_critical_region_.Acquire();
   auto it = thread_debug_infos_.find(thread_id);
   assert_true(it != thread_debug_infos_.end());
-  auto thread_info = it->second.get();
-  thread_info->state = ThreadDebugInfo::State::kZombie;
-  thread_info->thread = nullptr;
+  thread_debug_infos_.erase(it);
 }
 
 void Processor::OnThreadEnteringWait(uint32_t thread_id) {
@@ -672,7 +715,13 @@ bool Processor::OnThreadBreakpointHit(Exception* ex) {
 
   // Apply thread context changes.
   // TODO(benvanik): apply to all threads?
+#if XE_ARCH_AMD64
   ex->set_resume_pc(thread_info->host_context.rip);
+#elif XE_ARCH_ARM64
+  ex->set_resume_pc(thread_info->host_context.pc);
+#else
+#error Instruction pointer not specified for the target CPU architecture.
+#endif  // XE_ARCH
 
   // Resume execution.
   return true;
@@ -802,8 +851,8 @@ bool Processor::ResumeAllThreads() {
   return true;
 }
 
-void Processor::UpdateThreadExecutionStates(uint32_t override_thread_id,
-                                            X64Context* override_context) {
+void Processor::UpdateThreadExecutionStates(
+    uint32_t override_thread_id, HostThreadContext* override_context) {
   auto global_lock = global_critical_region_.Acquire();
   uint64_t frame_host_pcs[64];
   xe::cpu::StackFrame cpu_frames[64];
@@ -825,7 +874,7 @@ void Processor::UpdateThreadExecutionStates(uint32_t override_thread_id,
 
     // Grab stack trace and X64 context then resolve all symbols.
     uint64_t hash;
-    X64Context* in_host_context = nullptr;
+    HostThreadContext* in_host_context = nullptr;
     if (override_thread_id == thread_info->thread_id) {
       // If we were passed an override context we use that. Otherwise, ask the
       // stack walker for a new context.

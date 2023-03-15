@@ -76,8 +76,8 @@ class D3D12SharedMemory : public SharedMemory {
 
   void WriteRawSRVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle);
   void WriteRawUAVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle);
-  // Due to the Nvidia 128 megatexel limitation, the smallest supported formats
-  // are 32-bit.
+  // Due to the D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP limitation, the
+  // smallest supported formats are 32-bit.
   void WriteUintPow2SRVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle,
                                   uint32_t element_size_bytes_pow2);
   void WriteUintPow2UAVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle,
@@ -91,8 +91,8 @@ class D3D12SharedMemory : public SharedMemory {
   bool AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
                                         uint32_t length_allocations) override;
 
-  bool UploadRanges(const std::vector<std::pair<uint32_t, uint32_t>>&
-                        upload_page_ranges) override;
+  bool UploadRanges(const std::pair<uint32_t, uint32_t>* upload_page_ranges,
+                    uint32_t num_ranges) override;
 
  private:
   D3D12CommandProcessor& command_processor_;

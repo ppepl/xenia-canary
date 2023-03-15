@@ -20,7 +20,53 @@ namespace backend {
 namespace x64 {
 
 volatile int anchor_control = 0;
-
+template <typename T>
+static void EmitFusedBranch(X64Emitter& e, const T& i) {
+  bool valid = i.instr->prev && i.instr->prev->dest == i.src1.value;
+  auto opcode = valid ? i.instr->prev->opcode->num : -1;
+  if (valid) {
+    std::string name = i.src2.value->GetIdString();
+    switch (opcode) {
+      case OPCODE_COMPARE_EQ:
+        e.je(std::move(name), e.T_NEAR);
+        break;
+      case OPCODE_COMPARE_NE:
+        e.jne(std::move(name), e.T_NEAR);
+        break;
+      case OPCODE_COMPARE_SLT:
+        e.jl(std::move(name), e.T_NEAR);
+        break;
+      case OPCODE_COMPARE_SLE:
+        e.jle(std::move(name), e.T_NEAR);
+        break;
+      case OPCODE_COMPARE_SGT:
+        e.jg(std::move(name), e.T_NEAR);
+        break;
+      case OPCODE_COMPARE_SGE:
+        e.jge(std::move(name), e.T_NEAR);
+        break;
+      case OPCODE_COMPARE_ULT:
+        e.jb(std::move(name), e.T_NEAR);
+        break;
+      case OPCODE_COMPARE_ULE:
+        e.jbe(std::move(name), e.T_NEAR);
+        break;
+      case OPCODE_COMPARE_UGT:
+        e.ja(std::move(name), e.T_NEAR);
+        break;
+      case OPCODE_COMPARE_UGE:
+        e.jae(std::move(name), e.T_NEAR);
+        break;
+      default:
+        e.test(i.src1, i.src1);
+        e.jnz(std::move(name), e.T_NEAR);
+        break;
+    }
+  } else {
+    e.test(i.src1, i.src1);
+    e.jnz(i.src2.value->GetIdString(), e.T_NEAR);
+  }
+}
 // ============================================================================
 // OPCODE_DEBUG_BREAK
 // ============================================================================
@@ -57,22 +103,38 @@ struct DEBUG_BREAK_TRUE_I32
     : Sequence<DEBUG_BREAK_TRUE_I32,
                I<OPCODE_DEBUG_BREAK_TRUE, VoidOp, I32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.test(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip);
-    e.DebugBreak();
-    e.L(skip);
+    if (e.IsFeatureEnabled(kX64FastJrcx)) {
+      e.mov(e.ecx, i.src1);
+      Xbyak::Label skip;
+      e.jrcxz(skip);
+      e.DebugBreak();
+      e.L(skip);
+    } else {
+      e.test(i.src1, i.src1);
+      Xbyak::Label skip;
+      e.jz(skip);
+      e.DebugBreak();
+      e.L(skip);
+    }
   }
 };
 struct DEBUG_BREAK_TRUE_I64
     : Sequence<DEBUG_BREAK_TRUE_I64,
                I<OPCODE_DEBUG_BREAK_TRUE, VoidOp, I64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.test(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip);
-    e.DebugBreak();
-    e.L(skip);
+    if (e.IsFeatureEnabled(kX64FastJrcx)) {
+      e.mov(e.rcx, i.src1);
+      Xbyak::Label skip;
+      e.jrcxz(skip);
+      e.DebugBreak();
+      e.L(skip);
+    } else {
+      e.test(i.src1, i.src1);
+      Xbyak::Label skip;
+      e.jz(skip);
+      e.DebugBreak();
+      e.L(skip);
+    }
   }
 };
 struct DEBUG_BREAK_TRUE_F32
@@ -118,61 +180,48 @@ EMITTER_OPCODE_TABLE(OPCODE_TRAP, TRAP);
 struct TRAP_TRUE_I8
     : Sequence<TRAP_TRUE_I8, I<OPCODE_TRAP_TRUE, VoidOp, I8Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
+    Xbyak::Label& after = e.NewCachedLabel();
+    unsigned flags = i.instr->flags;
+    Xbyak::Label& dotrap =
+        e.AddToTail([flags, &after](X64Emitter& e, Xbyak::Label& me) {
+          e.L(me);
+          e.Trap(flags);
+          // does Trap actually return control to the guest?
+          e.jmp(after, X64Emitter::T_NEAR);
+        });
     e.test(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip);
-    e.Trap(i.instr->flags);
-    e.L(skip);
+    e.jnz(dotrap, X64Emitter::T_NEAR);
+    e.L(after);
   }
 };
 struct TRAP_TRUE_I16
     : Sequence<TRAP_TRUE_I16, I<OPCODE_TRAP_TRUE, VoidOp, I16Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.test(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip);
-    e.Trap(i.instr->flags);
-    e.L(skip);
+    assert_impossible_sequence(TRAP_TRUE_I16);
   }
 };
 struct TRAP_TRUE_I32
     : Sequence<TRAP_TRUE_I32, I<OPCODE_TRAP_TRUE, VoidOp, I32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.test(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip);
-    e.Trap(i.instr->flags);
-    e.L(skip);
+    assert_impossible_sequence(TRAP_TRUE_I32);
   }
 };
 struct TRAP_TRUE_I64
     : Sequence<TRAP_TRUE_I64, I<OPCODE_TRAP_TRUE, VoidOp, I64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.test(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip);
-    e.Trap(i.instr->flags);
-    e.L(skip);
+    assert_impossible_sequence(TRAP_TRUE_I64);
   }
 };
 struct TRAP_TRUE_F32
     : Sequence<TRAP_TRUE_F32, I<OPCODE_TRAP_TRUE, VoidOp, F32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vptest(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip);
-    e.Trap(i.instr->flags);
-    e.L(skip);
+    assert_impossible_sequence(TRAP_TRUE_F32);
   }
 };
 struct TRAP_TRUE_F64
     : Sequence<TRAP_TRUE_F64, I<OPCODE_TRAP_TRUE, VoidOp, F64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vptest(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip);
-    e.Trap(i.instr->flags);
-    e.L(skip);
+    assert_impossible_sequence(TRAP_TRUE_F64);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_TRAP_TRUE, TRAP_TRUE_I8, TRAP_TRUE_I16,
@@ -202,6 +251,7 @@ struct CALL_TRUE_I8
     e.jz(skip);
     e.Call(i.instr, static_cast<GuestFunction*>(i.src2.value));
     e.L(skip);
+    e.ForgetMxcsrMode();
   }
 };
 struct CALL_TRUE_I16
@@ -213,6 +263,7 @@ struct CALL_TRUE_I16
     e.jz(skip);
     e.Call(i.instr, static_cast<GuestFunction*>(i.src2.value));
     e.L(skip);
+    e.ForgetMxcsrMode();
   }
 };
 struct CALL_TRUE_I32
@@ -224,6 +275,7 @@ struct CALL_TRUE_I32
     e.jz(skip);
     e.Call(i.instr, static_cast<GuestFunction*>(i.src2.value));
     e.L(skip);
+    e.ForgetMxcsrMode();
   }
 };
 struct CALL_TRUE_I64
@@ -235,28 +287,20 @@ struct CALL_TRUE_I64
     e.jz(skip);
     e.Call(i.instr, static_cast<GuestFunction*>(i.src2.value));
     e.L(skip);
+    e.ForgetMxcsrMode();
   }
 };
 struct CALL_TRUE_F32
     : Sequence<CALL_TRUE_F32, I<OPCODE_CALL_TRUE, VoidOp, F32Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    assert_true(i.src2.value->is_guest());
-    e.vptest(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip);
-    e.Call(i.instr, static_cast<GuestFunction*>(i.src2.value));
-    e.L(skip);
+    assert_impossible_sequence(CALL_TRUE_F32);
   }
 };
+
 struct CALL_TRUE_F64
     : Sequence<CALL_TRUE_F64, I<OPCODE_CALL_TRUE, VoidOp, F64Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    assert_true(i.src2.value->is_guest());
-    e.vptest(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip);
-    e.Call(i.instr, static_cast<GuestFunction*>(i.src2.value));
-    e.L(skip);
+    assert_impossible_sequence(CALL_TRUE_F64);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_CALL_TRUE, CALL_TRUE_I8, CALL_TRUE_I16,
@@ -270,6 +314,7 @@ struct CALL_INDIRECT
     : Sequence<CALL_INDIRECT, I<OPCODE_CALL_INDIRECT, VoidOp, I64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     e.CallIndirect(i.instr, i.src1);
+    e.ForgetMxcsrMode();
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_CALL_INDIRECT, CALL_INDIRECT);
@@ -303,44 +348,52 @@ struct CALL_INDIRECT_TRUE_I32
     : Sequence<CALL_INDIRECT_TRUE_I32,
                I<OPCODE_CALL_INDIRECT_TRUE, VoidOp, I32Op, I64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.test(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip, CodeGenerator::T_NEAR);
-    e.CallIndirect(i.instr, i.src2);
-    e.L(skip);
+    if (e.IsFeatureEnabled(kX64FastJrcx)) {
+      e.mov(e.ecx, i.src1);
+      Xbyak::Label skip;
+      e.jrcxz(skip);
+      e.CallIndirect(i.instr, i.src2);
+      e.L(skip);
+    } else {
+      e.test(i.src1, i.src1);
+      Xbyak::Label skip;
+      e.jz(skip, CodeGenerator::T_NEAR);
+      e.CallIndirect(i.instr, i.src2);
+      e.L(skip);
+    }
   }
 };
 struct CALL_INDIRECT_TRUE_I64
     : Sequence<CALL_INDIRECT_TRUE_I64,
                I<OPCODE_CALL_INDIRECT_TRUE, VoidOp, I64Op, I64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.test(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip, CodeGenerator::T_NEAR);
-    e.CallIndirect(i.instr, i.src2);
-    e.L(skip);
+    if (e.IsFeatureEnabled(kX64FastJrcx)) {
+      e.mov(e.rcx, i.src1);
+      Xbyak::Label skip;
+      e.jrcxz(skip);
+      e.CallIndirect(i.instr, i.src2);
+      e.L(skip);
+    } else {
+      e.test(i.src1, i.src1);
+      Xbyak::Label skip;
+      e.jz(skip, CodeGenerator::T_NEAR);
+      e.CallIndirect(i.instr, i.src2);
+      e.L(skip);
+    }
   }
 };
 struct CALL_INDIRECT_TRUE_F32
     : Sequence<CALL_INDIRECT_TRUE_F32,
                I<OPCODE_CALL_INDIRECT_TRUE, VoidOp, F32Op, I64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vptest(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip, CodeGenerator::T_NEAR);
-    e.CallIndirect(i.instr, i.src2);
-    e.L(skip);
+    assert_impossible_sequence(CALL_INDIRECT_TRUE_F32);
   }
 };
 struct CALL_INDIRECT_TRUE_F64
     : Sequence<CALL_INDIRECT_TRUE_F64,
                I<OPCODE_CALL_INDIRECT_TRUE, VoidOp, F64Op, I64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vptest(i.src1, i.src1);
-    Xbyak::Label skip;
-    e.jz(skip, CodeGenerator::T_NEAR);
-    e.CallIndirect(i.instr, i.src2);
-    e.L(skip);
+    assert_impossible_sequence(CALL_INDIRECT_TRUE_F64);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_CALL_INDIRECT_TRUE, CALL_INDIRECT_TRUE_I8,
@@ -407,15 +460,13 @@ struct RETURN_TRUE_I64
 struct RETURN_TRUE_F32
     : Sequence<RETURN_TRUE_F32, I<OPCODE_RETURN_TRUE, VoidOp, F32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vptest(i.src1, i.src1);
-    e.jnz(e.epilog_label(), CodeGenerator::T_NEAR);
+    assert_impossible_sequence(RETURN_TRUE_F32);
   }
 };
 struct RETURN_TRUE_F64
     : Sequence<RETURN_TRUE_F64, I<OPCODE_RETURN_TRUE, VoidOp, F64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vptest(i.src1, i.src1);
-    e.jnz(e.epilog_label(), CodeGenerator::T_NEAR);
+    assert_impossible_sequence(RETURN_TRUE_F64);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RETURN_TRUE, RETURN_TRUE_I8, RETURN_TRUE_I16,
@@ -439,7 +490,7 @@ EMITTER_OPCODE_TABLE(OPCODE_SET_RETURN_ADDRESS, SET_RETURN_ADDRESS);
 // ============================================================================
 struct BRANCH : Sequence<BRANCH, I<OPCODE_BRANCH, VoidOp, LabelOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.jmp(i.src1.value->name, e.T_NEAR);
+    e.jmp(i.src1.value->GetIdString(), e.T_NEAR);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_BRANCH, BRANCH);
@@ -450,43 +501,49 @@ EMITTER_OPCODE_TABLE(OPCODE_BRANCH, BRANCH);
 struct BRANCH_TRUE_I8
     : Sequence<BRANCH_TRUE_I8, I<OPCODE_BRANCH_TRUE, VoidOp, I8Op, LabelOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.test(i.src1, i.src1);
-    e.jnz(i.src2.value->name, e.T_NEAR);
+    EmitFusedBranch(e, i);
   }
 };
 struct BRANCH_TRUE_I16
     : Sequence<BRANCH_TRUE_I16, I<OPCODE_BRANCH_TRUE, VoidOp, I16Op, LabelOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.test(i.src1, i.src1);
-    e.jnz(i.src2.value->name, e.T_NEAR);
+    EmitFusedBranch(e, i);
   }
 };
 struct BRANCH_TRUE_I32
     : Sequence<BRANCH_TRUE_I32, I<OPCODE_BRANCH_TRUE, VoidOp, I32Op, LabelOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.test(i.src1, i.src1);
-    e.jnz(i.src2.value->name, e.T_NEAR);
+    EmitFusedBranch(e, i);
   }
 };
 struct BRANCH_TRUE_I64
     : Sequence<BRANCH_TRUE_I64, I<OPCODE_BRANCH_TRUE, VoidOp, I64Op, LabelOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.test(i.src1, i.src1);
-    e.jnz(i.src2.value->name, e.T_NEAR);
+    EmitFusedBranch(e, i);
   }
 };
 struct BRANCH_TRUE_F32
     : Sequence<BRANCH_TRUE_F32, I<OPCODE_BRANCH_TRUE, VoidOp, F32Op, LabelOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vptest(i.src1, i.src1);
-    e.jnz(i.src2.value->name, e.T_NEAR);
+    /*
+                chrispy: right now, im not confident that we are always clearing
+       the upper 96 bits of registers, making vptest extremely unsafe. many
+       ss/sd operations copy over the upper 96 from the source, and for abs we
+       negate ALL elements, making the top 64 bits contain 0x80000000 etc
+        */
+    Xmm input = GetInputRegOrConstant(e, i.src1, e.xmm0);
+    e.vmovd(e.eax, input);
+    e.test(e.eax, e.eax);
+    e.jnz(i.src2.value->GetIdString(), e.T_NEAR);
   }
 };
 struct BRANCH_TRUE_F64
     : Sequence<BRANCH_TRUE_F64, I<OPCODE_BRANCH_TRUE, VoidOp, F64Op, LabelOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vptest(i.src1, i.src1);
-    e.jnz(i.src2.value->name, e.T_NEAR);
+    Xmm input = GetInputRegOrConstant(e, i.src1, e.xmm0);
+    e.vmovq(e.rax, input);
+    e.test(e.rax, e.rax);
+    e.jnz(i.src2.value->GetIdString(), e.T_NEAR);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_BRANCH_TRUE, BRANCH_TRUE_I8, BRANCH_TRUE_I16,
@@ -500,7 +557,7 @@ struct BRANCH_FALSE_I8
     : Sequence<BRANCH_FALSE_I8, I<OPCODE_BRANCH_FALSE, VoidOp, I8Op, LabelOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     e.test(i.src1, i.src1);
-    e.jz(i.src2.value->name, e.T_NEAR);
+    e.jz(i.src2.value->GetIdString(), e.T_NEAR);
   }
 };
 struct BRANCH_FALSE_I16
@@ -508,7 +565,7 @@ struct BRANCH_FALSE_I16
                I<OPCODE_BRANCH_FALSE, VoidOp, I16Op, LabelOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     e.test(i.src1, i.src1);
-    e.jz(i.src2.value->name, e.T_NEAR);
+    e.jz(i.src2.value->GetIdString(), e.T_NEAR);
   }
 };
 struct BRANCH_FALSE_I32
@@ -516,7 +573,7 @@ struct BRANCH_FALSE_I32
                I<OPCODE_BRANCH_FALSE, VoidOp, I32Op, LabelOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     e.test(i.src1, i.src1);
-    e.jz(i.src2.value->name, e.T_NEAR);
+    e.jz(i.src2.value->GetIdString(), e.T_NEAR);
   }
 };
 struct BRANCH_FALSE_I64
@@ -524,23 +581,27 @@ struct BRANCH_FALSE_I64
                I<OPCODE_BRANCH_FALSE, VoidOp, I64Op, LabelOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     e.test(i.src1, i.src1);
-    e.jz(i.src2.value->name, e.T_NEAR);
+    e.jz(i.src2.value->GetIdString(), e.T_NEAR);
   }
 };
 struct BRANCH_FALSE_F32
     : Sequence<BRANCH_FALSE_F32,
                I<OPCODE_BRANCH_FALSE, VoidOp, F32Op, LabelOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vptest(i.src1, i.src1);
-    e.jz(i.src2.value->name, e.T_NEAR);
+    Xmm input = GetInputRegOrConstant(e, i.src1, e.xmm0);
+    e.vmovd(e.eax, input);
+    e.test(e.eax, e.eax);
+    e.jz(i.src2.value->GetIdString(), e.T_NEAR);
   }
 };
 struct BRANCH_FALSE_F64
     : Sequence<BRANCH_FALSE_F64,
                I<OPCODE_BRANCH_FALSE, VoidOp, F64Op, LabelOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vptest(i.src1, i.src1);
-    e.jz(i.src2.value->name, e.T_NEAR);
+    Xmm input = GetInputRegOrConstant(e, i.src1, e.xmm0);
+    e.vmovq(e.rax, input);
+    e.test(e.rax, e.rax);
+    e.jz(i.src2.value->GetIdString(), e.T_NEAR);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_BRANCH_FALSE, BRANCH_FALSE_I8, BRANCH_FALSE_I16,

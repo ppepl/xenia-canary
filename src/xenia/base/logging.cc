@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2021 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -25,6 +26,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/debugging.h"
 #include "xenia/base/filesystem.h"
+#include "xenia/base/literals.h"
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
@@ -59,6 +61,7 @@ DEFINE_int32(
     "Logging");
 
 namespace dp = disruptorplus;
+using namespace xe::literals;
 
 namespace xe {
 
@@ -74,7 +77,7 @@ struct LogLine {
   char prefix_char;
 };
 
-thread_local char thread_log_buffer_[64 * 1024];
+thread_local char thread_log_buffer_[64_KiB];
 
 FileLogSink::~FileLogSink() {
   if (file_) {
@@ -221,6 +224,7 @@ class Logger {
 
     write_thread_ =
         xe::threading::Thread::Create({}, [this]() { WriteThread(); });
+    assert_not_null(write_thread_);
     write_thread_->set_name("Logging Writer");
   }
 
@@ -234,7 +238,7 @@ class Logger {
   }
 
  private:
-  static const size_t kBufferSize = 8 * 1024 * 1024;
+  static const size_t kBufferSize = 8_MiB;
   uint8_t buffer_[kBufferSize];
 
   static const size_t kBlockSize = 256;
@@ -435,9 +439,7 @@ void InitializeLogging(const std::string_view app_name) {
   if (cvars::log_file.empty()) {
     // Default to app name.
     auto file_name = fmt::format("{}.log", app_name);
-    auto file_path = std::filesystem::path(file_name);
-    xe::filesystem::CreateParentFolder(file_path);
-
+    auto file_path = xe::filesystem::GetExecutableFolder() / file_name;
     log_file = xe::filesystem::OpenFile(file_path, "wt");
   } else {
     xe::filesystem::CreateParentFolder(cvars::log_file);
@@ -464,17 +466,16 @@ void ShutdownLogging() {
 }
 
 bool logging::internal::ShouldLog(LogLevel log_level) {
-  return logger_ != nullptr &&
-         static_cast<int32_t>(log_level) <= cvars::log_level;
+  return static_cast<int32_t>(log_level) <= cvars::log_level;
 }
 
 std::pair<char*, size_t> logging::internal::GetThreadBuffer() {
   return {thread_log_buffer_, sizeof(thread_log_buffer_)};
 }
-
+XE_NOALIAS
 void logging::internal::AppendLogLine(LogLevel log_level,
                                       const char prefix_char, size_t written) {
-  if (!ShouldLog(log_level) || !written) {
+  if (!logger_ || !ShouldLog(log_level) || !written) {
     return;
   }
   logger_->AppendLine(xe::threading::current_thread_id(), prefix_char,
@@ -498,7 +499,13 @@ void FatalError(const std::string_view str) {
   }
 
   ShutdownLogging();
-  std::exit(1);
+
+#if XE_PLATFORM_ANDROID
+  // Throw an error that can be reported to the developers via the store.
+  std::abort();
+#else
+  std::exit(EXIT_FAILURE);
+#endif  // XE_PLATFORM_ANDROID
 }
 
 }  // namespace xe

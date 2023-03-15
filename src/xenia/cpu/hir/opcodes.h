@@ -11,7 +11,7 @@
 #define XENIA_CPU_HIR_OPCODES_H_
 
 #include <cstdint>
-
+#include "xenia/base/platform.h"
 namespace xe {
 namespace cpu {
 namespace hir {
@@ -122,16 +122,16 @@ enum Opcode {
   OPCODE_NOP,
   OPCODE_SOURCE_OFFSET,
   OPCODE_DEBUG_BREAK,
-  OPCODE_DEBUG_BREAK_TRUE,
+  OPCODE_DEBUG_BREAK_TRUE,  // remove, branch and break
   OPCODE_TRAP,
-  OPCODE_TRAP_TRUE,
+  OPCODE_TRAP_TRUE,  // remove, branch and trap
   OPCODE_CALL,
-  OPCODE_CALL_TRUE,
+  OPCODE_CALL_TRUE,  // remove, branch and call
   OPCODE_CALL_INDIRECT,
-  OPCODE_CALL_INDIRECT_TRUE,
+  OPCODE_CALL_INDIRECT_TRUE,  // remove, branch and call
   OPCODE_CALL_EXTERN,
   OPCODE_RETURN,
-  OPCODE_RETURN_TRUE,
+  OPCODE_RETURN_TRUE,  // remove, branch and return
   OPCODE_SET_RETURN_ADDRESS,
   OPCODE_BRANCH,
   OPCODE_BRANCH_TRUE,
@@ -194,8 +194,8 @@ enum Opcode {
   // 0x4F7FFD00.
   OPCODE_VECTOR_CONVERT_I2F,
   OPCODE_VECTOR_CONVERT_F2I,
-  OPCODE_LOAD_VECTOR_SHL,
-  OPCODE_LOAD_VECTOR_SHR,
+  OPCODE_LOAD_VECTOR_SHL,  // remove, use arithmetic instead
+  OPCODE_LOAD_VECTOR_SHR,  // remove, use arithmetic instead
   OPCODE_LOAD_CLOCK,
   OPCODE_LOAD_LOCAL,
   OPCODE_STORE_LOCAL,
@@ -204,10 +204,16 @@ enum Opcode {
   OPCODE_CONTEXT_BARRIER,
   OPCODE_LOAD_MMIO,
   OPCODE_STORE_MMIO,
-  OPCODE_LOAD_OFFSET,
-  OPCODE_STORE_OFFSET,
+  OPCODE_LOAD_OFFSET,   // remove, use add instead?
+  OPCODE_STORE_OFFSET,  // remove, use add instead?
   OPCODE_LOAD,
   OPCODE_STORE,
+  // chrispy: todo: implement, our current codegen for the unaligned loads is
+  // very bad
+  OPCODE_LVL,
+  OPCODE_LVR,
+  OPCODE_STVL,
+  OPCODE_STVR,
   OPCODE_MEMSET,
   OPCODE_CACHE_CONTROL,
   OPCODE_MEMORY_BARRIER,
@@ -216,9 +222,7 @@ enum Opcode {
   OPCODE_MIN,
   OPCODE_VECTOR_MIN,
   OPCODE_SELECT,
-  OPCODE_IS_TRUE,
-  OPCODE_IS_FALSE,
-  OPCODE_IS_NAN,
+  OPCODE_IS_NAN,  // remove? compare_eq with self instead
   OPCODE_COMPARE_EQ,
   OPCODE_COMPARE_NE,
   OPCODE_COMPARE_SLT,
@@ -229,14 +233,14 @@ enum Opcode {
   OPCODE_COMPARE_ULE,
   OPCODE_COMPARE_UGT,
   OPCODE_COMPARE_UGE,
-  OPCODE_DID_SATURATE,
+  OPCODE_DID_SATURATE,  // remove, use different way of tracking saturation
   OPCODE_VECTOR_COMPARE_EQ,
   OPCODE_VECTOR_COMPARE_SGT,
   OPCODE_VECTOR_COMPARE_SGE,
   OPCODE_VECTOR_COMPARE_UGT,
   OPCODE_VECTOR_COMPARE_UGE,
   OPCODE_ADD,
-  OPCODE_ADD_CARRY,
+  OPCODE_ADD_CARRY,  // remove, instead zero extend carry and add
   OPCODE_VECTOR_ADD,
   OPCODE_SUB,
   OPCODE_VECTOR_SUB,
@@ -244,7 +248,9 @@ enum Opcode {
   OPCODE_MUL_HI,  // TODO(benvanik): remove this and add INT128 type.
   OPCODE_DIV,
   OPCODE_MUL_ADD,
+  OPCODE_NEGATED_MUL_ADD,
   OPCODE_MUL_SUB,
+  OPCODE_NEGATED_MUL_SUB,
   OPCODE_NEG,
   OPCODE_ABS,
   OPCODE_SQRT,
@@ -255,6 +261,7 @@ enum Opcode {
   OPCODE_DOT_PRODUCT_3,
   OPCODE_DOT_PRODUCT_4,
   OPCODE_AND,
+  OPCODE_AND_NOT,  // remove, Not+And instead
   OPCODE_OR,
   OPCODE_XOR,
   OPCODE_NOT,
@@ -264,8 +271,8 @@ enum Opcode {
   OPCODE_VECTOR_SHR,
   OPCODE_SHA,
   OPCODE_VECTOR_SHA,
-  OPCODE_ROTATE_LEFT,
-  OPCODE_VECTOR_ROTATE_LEFT,
+  OPCODE_ROTATE_LEFT,         // remove, left/right shift combo instead
+  OPCODE_VECTOR_ROTATE_LEFT,  // eliminate, replace with left/right shift combo
   OPCODE_VECTOR_AVERAGE,
   OPCODE_BYTE_SWAP,
   OPCODE_CNTLZ,
@@ -274,11 +281,18 @@ enum Opcode {
   OPCODE_SPLAT,
   OPCODE_PERMUTE,
   OPCODE_SWIZZLE,
-  OPCODE_PACK,
+  OPCODE_PACK,  // break up into smaller operations and add a float16 convert
+                // opcode
   OPCODE_UNPACK,
   OPCODE_ATOMIC_EXCHANGE,
   OPCODE_ATOMIC_COMPARE_EXCHANGE,
   OPCODE_SET_ROUNDING_MODE,
+  OPCODE_VECTOR_DENORMFLUSH,  // converts denormals to signed zeros in a vector
+  OPCODE_TO_SINGLE,  // i could not find a decent name to assign to this opcode,
+                     // as we already have OPCODE_ROUND. round double to float (
+                     // ppc "single" fpu instruction result rounding behavior )
+  OPCODE_SET_NJM,
+	OPCODE_DELAY_EXECUTION, //for db16cyc
   __OPCODE_MAX_VALUE,  // Keep at end.
 };
 
@@ -290,6 +304,7 @@ enum OpcodeFlags {
   OPCODE_FLAG_IGNORE = (1 << 5),
   OPCODE_FLAG_HIDE = (1 << 6),
   OPCODE_FLAG_PAIRED_PREV = (1 << 7),
+  OPCODE_FLAG_DISALLOW_CONSTANT_FOLDING = (1 << 8)
 };
 
 enum OpcodeSignatureType {
@@ -346,18 +361,52 @@ enum OpcodeSignature {
 #define GET_OPCODE_SIG_TYPE_SRC1(sig) (OpcodeSignatureType)((sig >> 3) & 0x7)
 #define GET_OPCODE_SIG_TYPE_SRC2(sig) (OpcodeSignatureType)((sig >> 6) & 0x7)
 #define GET_OPCODE_SIG_TYPE_SRC3(sig) (OpcodeSignatureType)((sig >> 9) & 0x7)
+XE_MAYBE_UNUSED
+static bool IsOpcodeBinaryValue(uint32_t signature) {
+  return (signature & ~(0x7)) ==
+         ((OPCODE_SIG_TYPE_V << 3) | (OPCODE_SIG_TYPE_V << 6));
+}
+XE_MAYBE_UNUSED
+static bool IsOpcodeUnaryValue(uint32_t signature) {
+  return (signature & ~(0x7)) == ((OPCODE_SIG_TYPE_V << 3));
+}
+XE_MAYBE_UNUSED
+static void UnpackOpcodeSig(uint32_t sig, OpcodeSignatureType& dest,
+                            OpcodeSignatureType& src1,
+                            OpcodeSignatureType& src2,
+                            OpcodeSignatureType& src3) {
+  dest = GET_OPCODE_SIG_TYPE_DEST(sig);
+  src1 = GET_OPCODE_SIG_TYPE_SRC1(sig);
+  src2 = GET_OPCODE_SIG_TYPE_SRC2(sig);
+  src3 = GET_OPCODE_SIG_TYPE_SRC3(sig);
+}
 
+constexpr uint32_t GetNumOperandsForSig(uint32_t sig) {
+  sig >>= 3;
+
+  uint32_t result = 0;
+  while (sig) {
+    if (sig & 0x7) {
+      ++result;
+    }
+    sig >>= 3;
+  }
+  return result;
+}
 typedef struct {
+  Opcode num;
   uint32_t flags;
   uint32_t signature;
-  const char* name;
-  Opcode num;
 } OpcodeInfo;
 
 #define DEFINE_OPCODE(num, name, sig, flags) extern const OpcodeInfo num##_info;
 #include "xenia/cpu/hir/opcodes.inl"
 #undef DEFINE_OPCODE
 
+const char* GetOpcodeName(Opcode num);
+static inline const char* GetOpcodeName(const OpcodeInfo* info) {
+  return GetOpcodeName(info->num);
+}
 }  // namespace hir
 }  // namespace cpu
 }  // namespace xe

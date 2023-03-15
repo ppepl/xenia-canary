@@ -23,12 +23,14 @@
 #include "xenia/cpu/export_resolver.h"
 #include "xenia/kernel/util/native_list.h"
 #include "xenia/kernel/util/object_table.h"
+#include "xenia/kernel/util/xdbf_utils.h"
 #include "xenia/kernel/xam/app_manager.h"
 #include "xenia/kernel/xam/content_manager.h"
 #include "xenia/kernel/xam/user_profile.h"
 #include "xenia/memory.h"
 #include "xenia/vfs/virtual_file_system.h"
 #include "xenia/xbox.h"
+#include "achievement_manager.h"
 
 namespace xe {
 class ByteStream;
@@ -99,12 +101,44 @@ class KernelState {
   vfs::VirtualFileSystem* file_system() const { return file_system_; }
 
   uint32_t title_id() const;
+  util::XdbfGameData title_xdbf() const;
+  util::XdbfGameData module_xdbf(object_ref<UserModule> exec_module) const;
 
+  AchievementManager* achievement_manager() const {
+    return achievement_manager_.get();
+  }
   xam::AppManager* app_manager() const { return app_manager_.get(); }
   xam::ContentManager* content_manager() const {
     return content_manager_.get();
   }
-  xam::UserProfile* user_profile() const { return user_profile_.get(); }
+
+  uint8_t GetConnectedUsers() const;
+  void UpdateUsedUserProfiles();
+
+  bool IsUserSignedIn(uint32_t index) const {
+    return user_profiles_.find(index) != user_profiles_.cend();
+  }
+
+  bool IsUserSignedIn(uint64_t xuid) const {
+    return user_profile(xuid) != nullptr;
+  }
+
+  xam::UserProfile* user_profile(uint32_t index) const {
+    if (!IsUserSignedIn(index)) {
+      return nullptr;
+    }
+
+    return user_profiles_.at(index).get();
+  }
+
+  xam::UserProfile* user_profile(uint64_t xuid) const {
+    for (const auto& [key, value] : user_profiles_) {
+      if (value->xuid() == xuid) {
+        return user_profiles_.at(key).get();
+      }
+    }
+    return nullptr;
+  }
 
   // Access must be guarded by the global critical region.
   util::ObjectTable* object_table() { return &object_table_; }
@@ -134,6 +168,8 @@ class KernelState {
   void SetExecutableModule(object_ref<UserModule> module);
   object_ref<UserModule> LoadUserModule(const std::string_view name,
                                         bool call_entry = true);
+  X_RESULT FinishLoadingUserModule(const object_ref<UserModule> module,
+                                   bool call_entry = true);
   void UnloadUserModule(const object_ref<UserModule>& module,
                         bool call_entry = true);
 
@@ -150,6 +186,7 @@ class KernelState {
     return object_ref<T>(reinterpret_cast<T*>(module.release()));
   }
 
+  X_RESULT ApplyTitleUpdate(const object_ref<UserModule> module);
   // Terminates a title: Unloads all modules, and kills all guest threads.
   // This DOES NOT RETURN if called from a guest thread!
   void TerminateTitle();
@@ -196,6 +233,7 @@ class KernelState {
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);
 
+  uint32_t notification_position_ = 2;
  private:
   void LoadKernelModule(object_ref<KernelModule> kernel_module);
 
@@ -206,7 +244,8 @@ class KernelState {
 
   std::unique_ptr<xam::AppManager> app_manager_;
   std::unique_ptr<xam::ContentManager> content_manager_;
-  std::unique_ptr<xam::UserProfile> user_profile_;
+  std::map<uint8_t, std::unique_ptr<xam::UserProfile>> user_profiles_;
+  std::unique_ptr<AchievementManager> achievement_manager_;
 
   xe::global_critical_region global_critical_region_;
 

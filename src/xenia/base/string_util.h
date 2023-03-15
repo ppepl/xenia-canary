@@ -111,6 +111,36 @@ inline size_t copy_and_swap_maybe_truncating(char16_t* dest,
   return chars_copied;
 }
 
+inline bool hex_string_to_array(std::vector<uint8_t>& output_array,
+                                std::string_view value) {
+  if (value.rfind("0x", 0) == 0) {
+    value.remove_prefix(2);
+  }
+
+  output_array.reserve((value.size() + 1) / 2);
+
+  size_t remaining_length = value.size();
+  while (remaining_length > 0) {
+    uint8_t chars_to_read = remaining_length > 1 ? 2 : 1;
+    const char* substring_pointer =
+        value.data() + value.size() - remaining_length;
+
+    uint8_t string_value = 0;
+    std::from_chars_result result = std::from_chars(
+        substring_pointer, substring_pointer + chars_to_read, string_value, 16);
+
+    if (result.ec != std::errc() ||
+        result.ptr != substring_pointer + chars_to_read) {
+      output_array.clear();
+      return false;
+    }
+
+    output_array.push_back(string_value);
+    remaining_length -= chars_to_read;
+  }
+  return true;
+}
+
 inline std::string to_hex_string(uint32_t value) {
   return fmt::format("{:08X}", value);
 }
@@ -134,7 +164,7 @@ inline std::string to_hex_string(double value) {
 }
 
 inline std::string to_hex_string(const vec128_t& value) {
-  return fmt::format("[{:08X} {:08X} {:08X} {:08X} {:08X}]", value.u32[0],
+  return fmt::format("[{:08X} {:08X} {:08X} {:08X}]", value.u32[0],
                      value.u32[1], value.u32[2], value.u32[3]);
 }
 

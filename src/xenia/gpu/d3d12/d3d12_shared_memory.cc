@@ -43,7 +43,7 @@ bool D3D12SharedMemory::Initialize() {
   InitializeCommon();
 
   const ui::d3d12::D3D12Provider& provider =
-      command_processor_.GetD3D12Context().GetD3D12Provider();
+      command_processor_.GetD3D12Provider();
   ID3D12Device* device = provider.GetDevice();
 
   D3D12_RESOURCE_DESC buffer_desc;
@@ -215,8 +215,9 @@ void D3D12SharedMemory::CommitUAVWritesAndTransitionBuffer(
 
 void D3D12SharedMemory::WriteRawSRVDescriptor(
     D3D12_CPU_DESCRIPTOR_HANDLE handle) {
-  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
-  auto device = provider.GetDevice();
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
   device->CopyDescriptorsSimple(
       1, handle,
       provider.OffsetViewDescriptor(buffer_descriptor_heap_start_,
@@ -226,8 +227,9 @@ void D3D12SharedMemory::WriteRawSRVDescriptor(
 
 void D3D12SharedMemory::WriteRawUAVDescriptor(
     D3D12_CPU_DESCRIPTOR_HANDLE handle) {
-  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
-  auto device = provider.GetDevice();
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
   device->CopyDescriptorsSimple(
       1, handle,
       provider.OffsetViewDescriptor(buffer_descriptor_heap_start_,
@@ -252,8 +254,9 @@ void D3D12SharedMemory::WriteUintPow2SRVDescriptor(
       assert_unhandled_case(element_size_bytes_pow2);
       return;
   }
-  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
-  auto device = provider.GetDevice();
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
   device->CopyDescriptorsSimple(
       1, handle,
       provider.OffsetViewDescriptor(buffer_descriptor_heap_start_,
@@ -278,8 +281,9 @@ void D3D12SharedMemory::WriteUintPow2UAVDescriptor(
       assert_unhandled_case(element_size_bytes_pow2);
       return;
   }
-  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
-  auto device = provider.GetDevice();
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
   device->CopyDescriptorsSimple(
       1, handle,
       provider.OffsetViewDescriptor(buffer_descriptor_heap_start_,
@@ -298,8 +302,9 @@ bool D3D12SharedMemory::InitializeTraceSubmitDownloads() {
   ui::d3d12::util::FillBufferResourceDesc(
       download_buffer_desc, download_page_count << page_size_log2(),
       D3D12_RESOURCE_FLAG_NONE);
-  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
-  auto device = provider.GetDevice();
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
   if (FAILED(device->CreateCommittedResource(
           &ui::d3d12::util::kHeapPropertiesReadback,
           provider.GetHeapFlagCreateNotZeroed(), &download_buffer_desc,
@@ -365,7 +370,7 @@ bool D3D12SharedMemory::AllocateSparseHostGpuMemoryRange(
                           << host_gpu_memory_sparse_granularity_log2();
 
   const ui::d3d12::D3D12Provider& provider =
-      command_processor_.GetD3D12Context().GetD3D12Provider();
+      command_processor_.GetD3D12Provider();
   ID3D12Device* device = provider.GetDevice();
   ID3D12CommandQueue* direct_queue = provider.GetDirectQueue();
 
@@ -401,14 +406,16 @@ bool D3D12SharedMemory::AllocateSparseHostGpuMemoryRange(
 }
 
 bool D3D12SharedMemory::UploadRanges(
-    const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) {
-  if (upload_page_ranges.empty()) {
+    const std::pair<uint32_t, uint32_t>* upload_page_ranges,
+    uint32_t num_upload_page_ranges) {
+  if (!num_upload_page_ranges) {
     return true;
   }
   CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
   command_processor_.SubmitBarriers();
   auto& command_list = command_processor_.GetDeferredCommandList();
-  for (auto upload_range : upload_page_ranges) {
+  for (uint32_t i = 0; i < num_upload_page_ranges; ++i) {
+    auto& upload_range = upload_page_ranges[i];
     uint32_t upload_range_start = upload_range.first;
     uint32_t upload_range_length = upload_range.second;
     trace_writer_.WriteMemoryRead(upload_range_start << page_size_log2(),
@@ -427,10 +434,35 @@ bool D3D12SharedMemory::UploadRanges(
       }
       MakeRangeValid(upload_range_start << page_size_log2(),
                      uint32_t(upload_buffer_size), false, false);
-      std::memcpy(
-          upload_buffer_mapping,
-          memory().TranslatePhysical(upload_range_start << page_size_log2()),
-          upload_buffer_size);
+
+      // Handling for certain games that crashes due to accessing unallocated
+      // pages. It's usually happens with base_page that is completely different
+      // that any previously used ones. It always is completely not allocated.
+      // Additionally these requests are usually quite small 1-2 pages.
+      memory::PageAccess page_access =
+          memory().GetPhysicalHeap()->QueryRangeAccess(
+              upload_range_start << page_size_log2(),
+              (upload_range_start << page_size_log2()) +
+                  (uint32_t)1);  // Check only first page
+
+      if (page_access == xe::memory::PageAccess::kNoAccess) {
+        XELOGE("Invalid upload range for GPU: {:08X}", upload_range_start);
+        return false;
+      }
+
+      if (upload_buffer_size < (1ULL << 32) && upload_buffer_size > 8192) {
+        memory::vastcpy(
+            upload_buffer_mapping,
+            memory().TranslatePhysical(upload_range_start << page_size_log2()),
+            static_cast<uint32_t>(upload_buffer_size));
+        swcache::WriteFence();
+
+      } else {
+        memcpy(
+            upload_buffer_mapping,
+            memory().TranslatePhysical(upload_range_start << page_size_log2()),
+            upload_buffer_size);
+      }
       command_list.D3DCopyBufferRegion(
           buffer_, upload_range_start << page_size_log2(), upload_buffer,
           UINT64(upload_buffer_offset), UINT64(upload_buffer_size));

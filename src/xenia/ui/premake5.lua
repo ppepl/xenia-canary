@@ -14,7 +14,18 @@ project("xenia-ui")
   local_platform_files()
   removefiles({"*_demo.cc"})
   removefiles({"windowed_app_main_*.cc"})
-
+  filter({"configurations:Release", "platforms:Windows"})
+    buildoptions({
+      "/Os",
+      "/O1"
+    })
   filter("platforms:Android-*")
     -- Exports JNI functions.
     wholelib("On")
+
+  filter("platforms:Windows")
+    links({
+      "dwmapi",
+      "dxgi",
+      "winmm",
+    })

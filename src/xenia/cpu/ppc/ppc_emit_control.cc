@@ -16,6 +16,12 @@
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
 
 #include <stddef.h>
+// chrispy: added this, we can have simpler control flow and do dce on the
+// inputs
+DEFINE_bool(ignore_trap_instructions, true,
+            "Generate no code for powerpc trap instructions, can result in "
+            "better performance in games that aggressively check with trap.",
+            "CPU");
 
 namespace xe {
 namespace cpu {
@@ -416,8 +422,12 @@ int InstrEmit_crxor(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_mcrf(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  uint32_t crfd = i.XL.BO >> 2;
+  Value* bi = f.LoadCR(i.XL.BI >> 2);
+
+  f.StoreCR(crfd, bi);
+  f.UpdateCR(crfd, bi);
+  return 0;
 }
 
 // System linkage (A-24)
@@ -440,8 +450,14 @@ int InstrEmit_sc(PPCHIRBuilder& f, const InstrData& i) {
 
 // Trap (A-25)
 
+constexpr uint32_t TRAP_SLT = 1 << 4, TRAP_SGT = 1 << 3, TRAP_EQ = 1 << 2,
+                   TRAP_ULT = 1 << 1, TRAP_UGT = 1;
+
 int InstrEmit_trap(PPCHIRBuilder& f, const InstrData& i, Value* va, Value* vb,
                    uint32_t TO) {
+  if (cvars::ignore_trap_instructions) {
+    return 0;
+  }
   // if (a < b) & TO[0] then TRAP
   // if (a > b) & TO[1] then TRAP
   // if (a = b) & TO[2] then TRAP
@@ -454,30 +470,58 @@ int InstrEmit_trap(PPCHIRBuilder& f, const InstrData& i, Value* va, Value* vb,
     return 0;
   }
   Value* v = nullptr;
-  if (TO & (1 << 4)) {
-    // a < b
-    auto cmp = f.CompareSLT(va, vb);
-    v = v ? f.Or(v, cmp) : cmp;
-  }
-  if (TO & (1 << 3)) {
-    // a > b
-    auto cmp = f.CompareSGT(va, vb);
-    v = v ? f.Or(v, cmp) : cmp;
-  }
-  if (TO & (1 << 2)) {
-    // a = b
-    auto cmp = f.CompareEQ(va, vb);
-    v = v ? f.Or(v, cmp) : cmp;
-  }
-  if (TO & (1 << 1)) {
-    // a <u b
-    auto cmp = f.CompareULT(va, vb);
-    v = v ? f.Or(v, cmp) : cmp;
-  }
-  if (TO & (1 << 0)) {
-    // a >u b
-    auto cmp = f.CompareUGT(va, vb);
-    v = v ? f.Or(v, cmp) : cmp;
+
+  switch (TO) {
+    case TRAP_SLT | TRAP_EQ: {
+      v = f.CompareSLE(va, vb);
+      break;
+    }
+    case TRAP_SGT | TRAP_EQ: {
+      v = f.CompareSGE(va, vb);
+      break;
+    }
+    case TRAP_ULT | TRAP_EQ: {
+      v = f.CompareULE(va, vb);
+      break;
+    }
+    case TRAP_UGT | TRAP_EQ: {
+      v = f.CompareUGE(va, vb);
+      break;
+    }
+    case TRAP_SGT | TRAP_SLT:
+    case TRAP_UGT | TRAP_ULT: {  // used anywhere?
+      v = f.CompareNE(va, vb);
+      break;
+    }
+    default: {
+      // if (TO == )
+      if (TO & TRAP_SLT) {
+        // a < b
+        auto cmp = f.CompareSLT(va, vb);
+        v = v ? f.Or(v, cmp) : cmp;
+      }
+      if (TO & TRAP_SGT) {
+        // a > b
+        auto cmp = f.CompareSGT(va, vb);
+        v = v ? f.Or(v, cmp) : cmp;
+      }
+      if (TO & TRAP_EQ) {
+        // a = b
+        auto cmp = f.CompareEQ(va, vb);
+        v = v ? f.Or(v, cmp) : cmp;
+      }
+      if (TO & TRAP_ULT) {
+        // a <u b
+        auto cmp = f.CompareULT(va, vb);
+        v = v ? f.Or(v, cmp) : cmp;
+      }
+      if (TO & TRAP_UGT) {
+        // a >u b
+        auto cmp = f.CompareUGT(va, vb);
+        v = v ? f.Or(v, cmp) : cmp;
+      }
+      break;
+    }
   }
   if (v) {
     f.TrapTrue(v);
@@ -486,6 +530,9 @@ int InstrEmit_trap(PPCHIRBuilder& f, const InstrData& i, Value* va, Value* vb,
 }
 
 int InstrEmit_td(PPCHIRBuilder& f, const InstrData& i) {
+  if (cvars::ignore_trap_instructions) {
+    return 0;
+  }
   // a <- (RA)
   // b <- (RB)
   // if (a < b) & TO[0] then TRAP
@@ -499,6 +546,9 @@ int InstrEmit_td(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_tdi(PPCHIRBuilder& f, const InstrData& i) {
+  if (cvars::ignore_trap_instructions) {
+    return 0;
+  }
   // a <- (RA)
   // if (a < EXTS(SI)) & TO[0] then TRAP
   // if (a > EXTS(SI)) & TO[1] then TRAP
@@ -511,6 +561,9 @@ int InstrEmit_tdi(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_tw(PPCHIRBuilder& f, const InstrData& i) {
+  if (cvars::ignore_trap_instructions) {
+    return 0;
+  }
   // a <- EXTS((RA)[32:63])
   // b <- EXTS((RB)[32:63])
   // if (a < b) & TO[0] then TRAP
@@ -526,6 +579,9 @@ int InstrEmit_tw(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_twi(PPCHIRBuilder& f, const InstrData& i) {
+  if (cvars::ignore_trap_instructions) {
+    return 0;
+  }
   // a <- EXTS((RA)[32:63])
   // if (a < EXTS(SI)) & TO[0] then TRAP
   // if (a > EXTS(SI)) & TO[1] then TRAP
@@ -610,7 +666,9 @@ int InstrEmit_mfspr(PPCHIRBuilder& f, const InstrData& i) {
       break;
     case 256:
       // VRSAVE
-      v = f.LoadZeroInt64();
+
+      v = f.ZeroExtend(f.LoadContext(offsetof(PPCContext, vrsave), INT32_TYPE),
+                       INT64_TYPE);
       break;
     case 268:
       // TB
@@ -714,6 +772,8 @@ int InstrEmit_mtspr(PPCHIRBuilder& f, const InstrData& i) {
       f.StoreCTR(rt);
       break;
     case 256:
+
+      f.StoreContext(offsetof(PPCContext, vrsave), f.Truncate(rt, INT32_TYPE));
       // VRSAVE
       break;
     default:
@@ -729,66 +789,27 @@ int InstrEmit_mtspr(PPCHIRBuilder& f, const InstrData& i) {
 // code requires it. Sequences of mtmsr/lwar/stcw/mtmsr come up a lot, and
 // without the lock here threads can livelock.
 
+
+//0x400 = debug singlestep i think
+//ive seen 0x8000 used in kernel code 
 int InstrEmit_mfmsr(PPCHIRBuilder& f, const InstrData& i) {
   // bit 48 = EE; interrupt enabled
   // bit 62 = RI; recoverable interrupt
   // return 8000h if unlocked (interrupts enabled), else 0
-  f.MemoryBarrier();
-  f.CallExtern(f.builtins()->check_global_lock);
-  f.StoreGPR(i.X.RT, f.LoadContext(offsetof(PPCContext, scratch), INT64_TYPE));
+  f.StoreGPR(i.X.RT, f.LoadContext(offsetof(PPCContext, msr), INT64_TYPE));
   return 0;
 }
 
 int InstrEmit_mtmsr(PPCHIRBuilder& f, const InstrData& i) {
-  if (i.X.RA & 0x01) {
-    // L = 1
-    // iff storing from r13
-    f.MemoryBarrier();
-    f.StoreContext(
-        offsetof(PPCContext, scratch),
-        f.ZeroExtend(f.ZeroExtend(f.LoadGPR(i.X.RT), INT64_TYPE), INT64_TYPE));
-    if (i.X.RT == 13) {
-      // iff storing from r13 we are taking a lock (disable interrupts).
-      if (!cvars::disable_global_lock) {
-        f.CallExtern(f.builtins()->enter_global_lock);
-      }
-    } else {
-      // Otherwise we are restoring interrupts (probably).
-      if (!cvars::disable_global_lock) {
-        f.CallExtern(f.builtins()->leave_global_lock);
-      }
-    }
-    return 0;
-  } else {
-    // L = 0
-    XEINSTRNOTIMPLEMENTED();
-    return 1;
-  }
+  f.StoreContext(offsetof(PPCContext, msr), f.LoadGPR(i.X.RT));
+  return 0;
 }
 
 int InstrEmit_mtmsrd(PPCHIRBuilder& f, const InstrData& i) {
-  if (i.X.RA & 0x01) {
-    // L = 1
-    f.MemoryBarrier();
-    f.StoreContext(offsetof(PPCContext, scratch),
-                   f.ZeroExtend(f.LoadGPR(i.X.RT), INT64_TYPE));
-    if (i.X.RT == 13) {
-      // iff storing from r13 we are taking a lock (disable interrupts).
-      if (!cvars::disable_global_lock) {
-        f.CallExtern(f.builtins()->enter_global_lock);
-      }
-    } else {
-      // Otherwise we are restoring interrupts (probably).
-      if (!cvars::disable_global_lock) {
-        f.CallExtern(f.builtins()->leave_global_lock);
-      }
-    }
-    return 0;
-  } else {
-    // L = 0
-    XEINSTRNOTIMPLEMENTED();
-    return 1;
-  }
+	//todo: this is moving msr under a mask, so only writing EE and RI
+  f.StoreContext(offsetof(PPCContext, scratch),
+                 f.ZeroExtend(f.LoadGPR(i.X.RT), INT64_TYPE));
+  return 0;
 }
 
 void RegisterEmitCategoryControl() {

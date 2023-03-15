@@ -9,7 +9,6 @@
 
 #include "config.h"
 
-#include "third_party/cpptoml/include/cpptoml.h"
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
@@ -46,7 +45,7 @@ DEFINE_uint32(
     "Config");
 
 namespace config {
-std::string config_name = "xenia-mousehook.config.toml";
+std::string config_name = "xenia-canary-mousehook.config.toml";
 std::filesystem::path config_folder;
 std::filesystem::path config_path;
 std::string game_config_suffix = ".config.toml";
@@ -112,6 +111,10 @@ void ReadGameConfig(const std::filesystem::path& file_path) {
 }
 
 void SaveConfig() {
+  if (config_path.empty()) {
+    return;
+  }
+
   // All cvar defaults have been updated on loading - store the current date.
   auto defaults_date_cvar =
       dynamic_cast<cvar::ConfigVar<uint32_t>*>(cv::cv_defaults_date);

@@ -61,6 +61,7 @@ typedef uint32_t X_STATUS;
 #define X_STATUS_OBJECT_NAME_COLLISION                  ((X_STATUS)0xC0000035L)
 #define X_STATUS_INVALID_PAGE_PROTECTION                ((X_STATUS)0xC0000045L)
 #define X_STATUS_MUTANT_NOT_OWNED                       ((X_STATUS)0xC0000046L)
+#define X_STATUS_THREAD_IS_TERMINATING					((X_STATUS)0xC000004BL)
 #define X_STATUS_PROCEDURE_NOT_FOUND                    ((X_STATUS)0xC000007AL)
 #define X_STATUS_INSUFFICIENT_RESOURCES                 ((X_STATUS)0xC000009AL)
 #define X_STATUS_MEMORY_NOT_ALLOCATED                   ((X_STATUS)0xC00000A0L)
@@ -89,6 +90,7 @@ typedef uint32_t X_RESULT;
 #define X_ERROR_ACCESS_DENIED                   X_RESULT_FROM_WIN32(0x00000005L)
 #define X_ERROR_INVALID_HANDLE                  X_RESULT_FROM_WIN32(0x00000006L)
 #define X_ERROR_NO_MORE_FILES                   X_RESULT_FROM_WIN32(0x00000012L)
+#define X_ERROR_NOT_SUPPORTED                   X_RESULT_FROM_WIN32(0x00000032L)
 #define X_ERROR_INVALID_PARAMETER               X_RESULT_FROM_WIN32(0x00000057L)
 #define X_ERROR_INSUFFICIENT_BUFFER             X_RESULT_FROM_WIN32(0x0000007AL)
 #define X_ERROR_INVALID_NAME                    X_RESULT_FROM_WIN32(0x0000007BL)
@@ -312,7 +314,8 @@ struct X_OBJECT_ATTRIBUTES {
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/aa363082.aspx
 typedef struct {
-  xe::be<uint32_t> exception_code;
+  // Renamed due to a collision with exception_code from Windows excpt.h.
+  xe::be<uint32_t> code;
   xe::be<uint32_t> exception_flags;
   xe::be<uint32_t> exception_record;
   xe::be<uint32_t> exception_address;

@@ -11,16 +11,7 @@
 #define XENIA_GPU_SHADER_TRANSLATOR_H_
 
 #include <memory>
-#include <set>
-#include <string>
-#include <vector>
-
-#include "xenia/base/math.h"
-#include "xenia/base/string_buffer.h"
-#include "xenia/gpu/registers.h"
 #include "xenia/gpu/shader.h"
-#include "xenia/gpu/ucode.h"
-#include "xenia/gpu/xenos.h"
 
 namespace xe {
 namespace gpu {
@@ -55,7 +46,9 @@ class ShaderTranslator {
 
   // Register count from SQ_PROGRAM_CNTL, stored by the implementation in its
   // modification bits.
-  virtual uint32_t GetModificationRegisterCount() const { return 64; }
+  virtual uint32_t GetModificationRegisterCount() const {
+    return xenos::kMaxShaderTempRegisters;
+  }
 
   // True if the current shader is a vertex shader.
   bool is_vertex_shader() const {

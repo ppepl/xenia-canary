@@ -73,6 +73,16 @@ X_STATUS XSocket::Close() {
   return X_STATUS_SUCCESS;
 }
 
+X_STATUS XSocket::GetOption(uint32_t level, uint32_t optname, void* optval_ptr,
+                            int* optlen) {
+  int ret =
+      getsockopt(native_handle_, level, optname, (char*)optval_ptr, optlen);
+  if (ret < 0) {
+    // TODO: WSAGetLastError()
+    return X_STATUS_UNSUCCESSFUL;
+  }
+  return X_STATUS_SUCCESS;
+}
 X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
                             uint32_t optlen) {
   if (level == 0xFFFF && (optname == 0x5801 || optname == 0x5802)) {
@@ -255,6 +265,27 @@ bool XSocket::QueuePacket(uint32_t src_ip, uint16_t src_port,
 
   // TODO: Limit on number of incoming packets?
   return true;
+}
+
+X_STATUS XSocket::GetSockName(uint8_t* buf, int* buf_len) {
+  struct sockaddr sa = {};
+
+  int ret = getsockname(native_handle_, &sa, (socklen_t*)buf_len);
+  if (ret < 0) {
+    return X_STATUS_UNSUCCESSFUL;
+  }
+
+  std::memcpy(buf, &sa, *buf_len);
+  return X_STATUS_SUCCESS;
+}
+
+uint32_t XSocket::GetLastWSAError() const {
+  // Todo(Gliniak): Provide error mapping table
+  // Xbox error codes might not match with what we receive from OS
+#ifdef XE_PLATFORM_WIN32
+  return WSAGetLastError();
+#endif
+  return errno;
 }
 
 }  // namespace kernel

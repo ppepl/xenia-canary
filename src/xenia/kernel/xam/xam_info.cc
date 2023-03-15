@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -15,6 +15,7 @@
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/xam_private.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/kernel/xenumerator.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
@@ -26,12 +27,17 @@
 #include "third_party/fmt/include/fmt/format.h"
 
 DEFINE_int32(avpack, 8, "Video modes", "Video");
+DECLARE_int32(user_country);
+DECLARE_int32(user_language);
 
 namespace xe {
 namespace kernel {
 namespace xam {
 
-dword_result_t XamFeatureEnabled(dword_t unk) { return 0; }
+// https://github.com/tpn/winsdk-10/blob/master/Include/10.0.14393.0/km/wdm.h#L15539
+typedef enum _MODE { KernelMode, UserMode, MaximumMode } MODE;
+
+dword_result_t XamFeatureEnabled_entry(dword_t unk) { return 0; }
 DECLARE_XAM_EXPORT1(XamFeatureEnabled, kNone, kStub);
 
 // Empty stub schema binary.
@@ -42,7 +48,7 @@ uint8_t schema_bin[] = {
     0x00, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18,
 };
 
-dword_result_t XamGetOnlineSchema() {
+dword_result_t XamGetOnlineSchema_entry() {
   static uint32_t schema_guest = 0;
 
   if (!schema_guest) {
@@ -73,8 +79,8 @@ static SYSTEMTIME xeGetLocalSystemTime(uint64_t filetime) {
 }
 #endif
 
-void XamFormatDateString(dword_t unk, qword_t filetime, lpvoid_t output_buffer,
-                         dword_t output_count) {
+void XamFormatDateString_entry(dword_t unk, qword_t filetime,
+                               lpvoid_t output_buffer, dword_t output_count) {
   std::memset(output_buffer, 0, output_count * sizeof(char16_t));
 
 // TODO: implement this for other platforms
@@ -90,8 +96,8 @@ void XamFormatDateString(dword_t unk, qword_t filetime, lpvoid_t output_buffer,
 }
 DECLARE_XAM_EXPORT1(XamFormatDateString, kNone, kImplemented);
 
-void XamFormatTimeString(dword_t unk, qword_t filetime, lpvoid_t output_buffer,
-                         dword_t output_count) {
+void XamFormatTimeString_entry(dword_t unk, qword_t filetime,
+                               lpvoid_t output_buffer, dword_t output_count) {
   std::memset(output_buffer, 0, output_count * sizeof(char16_t));
 
 // TODO: implement this for other platforms
@@ -127,18 +133,19 @@ dword_result_t keXamBuildResourceLocator(uint64_t module,
   return 0;
 }
 
-dword_result_t XamBuildResourceLocator(qword_t module, lpu16string_t container,
-                                       lpu16string_t resource,
-                                       lpvoid_t buffer_ptr,
-                                       dword_t buffer_count) {
+dword_result_t XamBuildResourceLocator_entry(qword_t module,
+                                             lpu16string_t container,
+                                             lpu16string_t resource,
+                                             lpvoid_t buffer_ptr,
+                                             dword_t buffer_count) {
   return keXamBuildResourceLocator(module, container.value(), resource.value(),
                                    buffer_ptr, buffer_count);
 }
 DECLARE_XAM_EXPORT1(XamBuildResourceLocator, kNone, kImplemented);
 
-dword_result_t XamBuildGamercardResourceLocator(lpu16string_t filename,
-                                                lpvoid_t buffer_ptr,
-                                                dword_t buffer_count) {
+dword_result_t XamBuildGamercardResourceLocator_entry(lpu16string_t filename,
+                                                      lpvoid_t buffer_ptr,
+                                                      dword_t buffer_count) {
   // On an actual xbox these funcs would return a locator to xam.xex resources,
   // but for Xenia we can return a locator to the resources as local files. (big
   // thanks to MS for letting XamBuildResourceLocator return local file
@@ -152,32 +159,32 @@ dword_result_t XamBuildGamercardResourceLocator(lpu16string_t filename,
 }
 DECLARE_XAM_EXPORT1(XamBuildGamercardResourceLocator, kNone, kImplemented);
 
-dword_result_t XamBuildSharedSystemResourceLocator(lpu16string_t filename,
-                                                   lpvoid_t buffer_ptr,
-                                                   dword_t buffer_count) {
+dword_result_t XamBuildSharedSystemResourceLocator_entry(lpu16string_t filename,
+                                                         lpvoid_t buffer_ptr,
+                                                         dword_t buffer_count) {
   // see notes inside XamBuildGamercardResourceLocator above
   return keXamBuildResourceLocator(0, u"shrdres", filename.value(), buffer_ptr,
                                    buffer_count);
 }
 DECLARE_XAM_EXPORT1(XamBuildSharedSystemResourceLocator, kNone, kImplemented);
 
-dword_result_t XamBuildLegacySystemResourceLocator(lpu16string_t filename,
-                                                   lpvoid_t buffer_ptr,
-                                                   dword_t buffer_count) {
-  return XamBuildSharedSystemResourceLocator(filename, buffer_ptr,
-                                             buffer_count);
+dword_result_t XamBuildLegacySystemResourceLocator_entry(lpu16string_t filename,
+                                                         lpvoid_t buffer_ptr,
+                                                         dword_t buffer_count) {
+  return XamBuildSharedSystemResourceLocator_entry(filename, buffer_ptr,
+                                                   buffer_count);
 }
 DECLARE_XAM_EXPORT1(XamBuildLegacySystemResourceLocator, kNone, kImplemented);
 
-dword_result_t XamBuildXamResourceLocator(lpu16string_t filename,
-                                          lpvoid_t buffer_ptr,
-                                          dword_t buffer_count) {
+dword_result_t XamBuildXamResourceLocator_entry(lpu16string_t filename,
+                                                lpvoid_t buffer_ptr,
+                                                dword_t buffer_count) {
   return keXamBuildResourceLocator(0, u"xam", filename.value(), buffer_ptr,
                                    buffer_count);
 }
 DECLARE_XAM_EXPORT1(XamBuildXamResourceLocator, kNone, kImplemented);
 
-dword_result_t XamGetSystemVersion() {
+dword_result_t XamGetSystemVersion_entry() {
   // eh, just picking one. If we go too low we may break new games, but
   // this value seems to be used for conditionally loading symbols and if
   // we pretend to be old we have less to worry with implementing.
@@ -187,13 +194,14 @@ dword_result_t XamGetSystemVersion() {
 }
 DECLARE_XAM_EXPORT1(XamGetSystemVersion, kNone, kStub);
 
-void XCustomRegisterDynamicActions() {
+void XCustomRegisterDynamicActions_entry() {
   // ???
 }
 DECLARE_XAM_EXPORT1(XCustomRegisterDynamicActions, kNone, kStub);
 
-dword_result_t XGetAVPack() {
-  // Value from https://github.com/Free60Project/libxenon/blob/920146f/libxenon/drivers/xenos/xenos_videomodes.h
+dword_result_t XGetAVPack_entry() {
+  // Value from
+  // https://github.com/Free60Project/libxenon/blob/920146f/libxenon/drivers/xenos/xenos_videomodes.h
   // DWORD
   // Not sure what the values are for this, but 6 is VGA.
   // Other likely values are 3/4/8 for HDMI or something.
@@ -203,29 +211,98 @@ dword_result_t XGetAVPack() {
 }
 DECLARE_XAM_EXPORT1(XGetAVPack, kNone, kStub);
 
-uint32_t xeXGetGameRegion() { return 0xFFFFu; }
+uint32_t xeXGetGameRegion() {
+  static uint32_t const table[] = {
+      0xFFFFu, 0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x02FEu, 0x0201u, 0x03FFu,
+      0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x02FEu, 0x03FFu,
+      0x00FFu, 0xFFFFu, 0x02FEu, 0x03FFu, 0x0102u, 0x03FFu, 0x03FFu, 0x02FEu,
+      0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu, 0x03FFu, 0x02FEu, 0x03FFu, 0x02FEu,
+      0x02FEu, 0x02FEu, 0x02FEu, 0x02FEu, 0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu,
+      0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu,
+      0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu, 0x0101u, 0x03FFu, 0x03FFu,
+      0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x02FEu, 0x02FEu, 0x02FEu, 0x02FEu,
+      0x03FFu, 0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x0102u, 0x03FFu, 0x00FFu,
+      0x03FFu, 0x03FFu, 0x02FEu, 0x02FEu, 0x0201u, 0x03FFu, 0x03FFu, 0x03FFu,
+      0x03FFu, 0x03FFu, 0x02FEu, 0x03FFu, 0x02FEu, 0x03FFu, 0x03FFu, 0x02FEu,
+      0x02FEu, 0x03FFu, 0x02FEu, 0x03FFu, 0x02FEu, 0x02FEu, 0xFFFFu, 0x03FFu,
+      0x03FFu, 0x03FFu, 0x03FFu, 0x02FEu, 0x03FFu, 0x03FFu, 0x02FEu, 0x00FFu,
+      0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu};
+  auto country = static_cast<uint8_t>(cvars::user_country);
+  return country < xe::countof(table) ? table[country] : 0xFFFFu;
+}
 
-dword_result_t XGetGameRegion() { return xeXGetGameRegion(); }
+dword_result_t XGetGameRegion_entry() { return xeXGetGameRegion(); }
 DECLARE_XAM_EXPORT1(XGetGameRegion, kNone, kStub);
 
-dword_result_t XGetLanguage() {
-  auto desired_language = XLanguage::kEnglish;
+dword_result_t XGetLanguage_entry() {
+  auto desired_language = static_cast<XLanguage>(cvars::user_language);
 
   // Switch the language based on game region.
   // TODO(benvanik): pull from xex header.
-  uint32_t game_region = XEX_REGION_NTSCU;
+  /* uint32_t game_region = XEX_REGION_NTSCU;
   if (game_region & XEX_REGION_NTSCU) {
     desired_language = XLanguage::kEnglish;
   } else if (game_region & XEX_REGION_NTSCJ) {
     desired_language = XLanguage::kJapanese;
-  }
+  }*/
   // Add more overrides?
 
   return uint32_t(desired_language);
 }
 DECLARE_XAM_EXPORT1(XGetLanguage, kNone, kImplemented);
 
-dword_result_t XamGetExecutionId(lpdword_t info_ptr) {
+// http://www.noxa.org/blog/2011/02/28/building-an-xbox-360-emulator-part-3-feasibilityos/
+// http://www.noxa.org/blog/2011/08/13/building-an-xbox-360-emulator-part-5-xex-files/
+dword_result_t RtlSleep_entry(dword_t dwMilliseconds, dword_t bAlertable) {
+  LARGE_INTEGER delay{};
+
+  // Convert the delay time to 100-nanosecond intervals
+  delay.QuadPart = dwMilliseconds == -1
+                       ? LLONG_MAX
+                       : static_cast<LONGLONG>(-10000) * dwMilliseconds;
+
+  X_STATUS result = xboxkrnl::KeDelayExecutionThread(
+      MODE::UserMode,
+      bAlertable,
+      (uint64_t*)&delay);
+
+  // If the delay was interrupted by an APC, keep delaying the thread
+  while (bAlertable && result == X_STATUS_ALERTED) {
+    result = xboxkrnl::KeDelayExecutionThread(MODE::UserMode, bAlertable,
+                                              (uint64_t*)&delay);
+  }
+
+  return result == X_STATUS_SUCCESS ? X_STATUS_SUCCESS : X_STATUS_USER_APC;
+}
+DECLARE_XAM_EXPORT1(RtlSleep, kNone, kImplemented);
+
+dword_result_t SleepEx_entry(dword_t dwMilliseconds, dword_t bAlertable) {
+  return RtlSleep_entry(dwMilliseconds, bAlertable);
+}
+DECLARE_XAM_EXPORT1(SleepEx, kNone, kImplemented);
+
+// https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-sleep
+void Sleep_entry(dword_t dwMilliseconds) {
+  RtlSleep_entry(dwMilliseconds, FALSE);
+}
+DECLARE_XAM_EXPORT1(Sleep, kNone, kImplemented);
+
+// https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-gettickcount
+dword_result_t GetTickCount_entry() { return Clock::QueryGuestUptimeMillis(); }
+DECLARE_XAM_EXPORT1(GetTickCount, kNone, kImplemented);
+
+dword_result_t GetModuleHandleA_entry(lpstring_t moduleName) {
+  auto module = kernel_state()->GetModule(moduleName.value(), false);
+  return module ? module->hmodule_ptr() : NULL;
+}
+DECLARE_XAM_EXPORT1(GetModuleHandleA, kNone, kImplemented);
+
+dword_result_t XamGetCurrentTitleId_entry() {
+  return kernel_state()->emulator()->title_id();
+}
+DECLARE_XAM_EXPORT1(XamGetCurrentTitleId, kNone, kImplemented);
+
+dword_result_t XamGetExecutionId_entry(lpdword_t info_ptr) {
   auto module = kernel_state()->GetExecutableModule();
   assert_not_null(module);
 
@@ -242,7 +319,7 @@ dword_result_t XamGetExecutionId(lpdword_t info_ptr) {
 }
 DECLARE_XAM_EXPORT1(XamGetExecutionId, kNone, kImplemented);
 
-dword_result_t XamLoaderSetLaunchData(lpvoid_t data, dword_t size) {
+dword_result_t XamLoaderSetLaunchData_entry(lpvoid_t data, dword_t size) {
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
   auto& loader_data = xam->loader_data();
   loader_data.launch_data_present = size ? true : false;
@@ -252,7 +329,7 @@ dword_result_t XamLoaderSetLaunchData(lpvoid_t data, dword_t size) {
 }
 DECLARE_XAM_EXPORT1(XamLoaderSetLaunchData, kNone, kSketchy);
 
-dword_result_t XamLoaderGetLaunchDataSize(lpdword_t size_ptr) {
+dword_result_t XamLoaderGetLaunchDataSize_entry(lpdword_t size_ptr) {
   if (!size_ptr) {
     return X_ERROR_INVALID_PARAMETER;
   }
@@ -269,8 +346,8 @@ dword_result_t XamLoaderGetLaunchDataSize(lpdword_t size_ptr) {
 }
 DECLARE_XAM_EXPORT1(XamLoaderGetLaunchDataSize, kNone, kSketchy);
 
-dword_result_t XamLoaderGetLaunchData(lpvoid_t buffer_ptr,
-                                      dword_t buffer_size) {
+dword_result_t XamLoaderGetLaunchData_entry(lpvoid_t buffer_ptr,
+                                            dword_t buffer_size) {
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
   auto& loader_data = xam->loader_data();
   if (!loader_data.launch_data_present) {
@@ -284,7 +361,7 @@ dword_result_t XamLoaderGetLaunchData(lpvoid_t buffer_ptr,
 }
 DECLARE_XAM_EXPORT1(XamLoaderGetLaunchData, kNone, kSketchy);
 
-void XamLoaderLaunchTitle(lpstring_t raw_name_ptr, dword_t flags) {
+void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
 
   auto& loader_data = xam->loader_data();
@@ -313,17 +390,23 @@ void XamLoaderLaunchTitle(lpstring_t raw_name_ptr, dword_t flags) {
 }
 DECLARE_XAM_EXPORT1(XamLoaderLaunchTitle, kNone, kSketchy);
 
-void XamLoaderTerminateTitle() {
+void XamLoaderTerminateTitle_entry() {
   // This function does not return.
   kernel_state()->TerminateTitle();
 }
 DECLARE_XAM_EXPORT1(XamLoaderTerminateTitle, kNone, kSketchy);
 
-dword_result_t XamAlloc(dword_t unk, dword_t size, lpdword_t out_ptr) {
-  assert_true(unk == 0);
+dword_result_t XamAlloc_entry(dword_t flags, dword_t size, lpdword_t out_ptr) {
+  if (flags & 0x00100000) {  // HEAP_ZERO_memory used unless this flag
+    // do nothing!
+    // maybe we ought to fill it with nonzero garbage, but otherwise this is a
+    // flag we can safely ignore
+  }
 
   // Allocate from the heap. Not sure why XAM does this specially, perhaps
   // it keeps stuff in a separate heap?
+  // chrispy: there is a set of different heaps it uses, an array of them. the
+  // top 4 bits of the 32 bit flags seems to select the heap
   uint32_t ptr = kernel_state()->memory()->SystemHeapAlloc(size);
   *out_ptr = ptr;
 
@@ -331,22 +414,22 @@ dword_result_t XamAlloc(dword_t unk, dword_t size, lpdword_t out_ptr) {
 }
 DECLARE_XAM_EXPORT1(XamAlloc, kMemory, kImplemented);
 
-dword_result_t XamFree(lpdword_t ptr) {
+dword_result_t XamFree_entry(lpdword_t ptr) {
   kernel_state()->memory()->SystemHeapFree(ptr.guest_address());
 
   return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamFree, kMemory, kImplemented);
 
-dword_result_t XamQueryLiveHiveW(lpu16string_t name, lpvoid_t out_buf,
-                                 dword_t out_size, dword_t type /* guess */) {
+dword_result_t XamQueryLiveHiveW_entry(lpu16string_t name, lpvoid_t out_buf,
+                                       dword_t out_size,
+                                       dword_t type /* guess */) {
   return X_STATUS_INVALID_PARAMETER_1;
 }
 DECLARE_XAM_EXPORT1(XamQueryLiveHiveW, kNone, kStub);
 
-void RegisterInfoExports(xe::cpu::ExportResolver* export_resolver,
-                         KernelState* kernel_state) {}
-
 }  // namespace xam
 }  // namespace kernel
 }  // namespace xe
+
+DECLARE_XAM_EMPTY_REGISTER_EXPORTS(Info);

@@ -19,6 +19,14 @@
 
 namespace xe {
 namespace kernel {
+enum class X_WSAError : uint32_t {
+  X_WSA_INVALID_PARAMETER = 0x0057,
+  X_WSAEFAULT = 0x271E,
+  X_WSAEINVAL = 0x2726,
+  X_WSAENOTSOCK = 0x2736,
+  X_WSAEMSGSIZE = 0x2738,
+};
+
 struct XSOCKADDR {
   xe::be<uint16_t> address_family;
   char sa_data[14];
@@ -99,6 +107,8 @@ class XSocket : public XObject {
   X_STATUS Initialize(AddressFamily af, Type type, Protocol proto);
   X_STATUS Close();
 
+  X_STATUS GetOption(uint32_t level, uint32_t optname, void* optval_ptr,
+                     int* optlen);
   X_STATUS SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
                      uint32_t optlen);
   X_STATUS IOControl(uint32_t cmd, uint8_t* arg_ptr);
@@ -106,6 +116,7 @@ class XSocket : public XObject {
   X_STATUS Connect(N_XSOCKADDR* name, int name_len);
   X_STATUS Bind(N_XSOCKADDR_IN* name, int name_len);
   X_STATUS Listen(int backlog);
+  X_STATUS GetSockName(uint8_t* buf, int* buf_len);
   object_ref<XSocket> Accept(N_XSOCKADDR* name, int* name_len);
   int Shutdown(int how);
 
@@ -116,6 +127,8 @@ class XSocket : public XObject {
                N_XSOCKADDR_IN* from, uint32_t* from_len);
   int SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* to,
              uint32_t to_len);
+
+  uint32_t GetLastWSAError() const;
 
   struct packet {
     // These values are in network byte order.

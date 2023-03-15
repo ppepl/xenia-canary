@@ -46,6 +46,7 @@ namespace reg {
 *******************************************************************************/
 
 union alignas(uint32_t) COHER_STATUS_HOST {
+  uint32_t value;
   struct {
     uint32_t matching_contexts : 8;      // +0
     uint32_t rb_copy_dest_base_ena : 1;  // +8
@@ -64,12 +65,12 @@ union alignas(uint32_t) COHER_STATUS_HOST {
     uint32_t : 4;                        // +27
     uint32_t status : 1;                 // +31
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_COHER_STATUS_HOST;
 };
 static_assert_size(COHER_STATUS_HOST, sizeof(uint32_t));
 
 union alignas(uint32_t) WAIT_UNTIL {
+  uint32_t value;
   struct {
     uint32_t : 1;                    // +0
     uint32_t wait_re_vsync : 1;      // +1
@@ -88,7 +89,6 @@ union alignas(uint32_t) WAIT_UNTIL {
     uint32_t : 2;                    // +18
     uint32_t cmdfifo_entries : 4;    // +20
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_WAIT_UNTIL;
 };
 static_assert_size(WAIT_UNTIL, sizeof(uint32_t));
@@ -102,6 +102,7 @@ static_assert_size(WAIT_UNTIL, sizeof(uint32_t));
 *******************************************************************************/
 
 union alignas(uint32_t) SQ_PROGRAM_CNTL {
+  uint32_t value;
   struct {
     // Note from a2xx.xml:
     // Only 0x3F worth of valid register values for VS_NUM_REG and PS_NUM_REG,
@@ -118,54 +119,137 @@ union alignas(uint32_t) SQ_PROGRAM_CNTL {
     uint32_t ps_export_mode : 4;                       // +27
     uint32_t gen_index_vtx : 1;                        // +31
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_SQ_PROGRAM_CNTL;
 };
 static_assert_size(SQ_PROGRAM_CNTL, sizeof(uint32_t));
 
 union alignas(uint32_t) SQ_CONTEXT_MISC {
+  uint32_t value;
   struct {
     uint32_t inst_pred_optimize : 1;          // +0
     uint32_t sc_output_screen_xy : 1;         // +1
     xenos::SampleControl sc_sample_cntl : 2;  // +2
     uint32_t : 4;                             // +4
-    // Pixel shader interpolator (according to the XNA microcode compiler) index
-    // to write pixel parameters to. So far have been able to find the following
-    // usage:
-    // * |XY| - position on screen (vPos - the XNA microcode compiler translates
-    //   ps_3_0 vPos directly to this, so at least in Direct3D 9 pixel center
-    //   mode, this contains 0, 1, 2, not 0.5, 1.5, 2.5). flto also said in the
+    // Pixel shader interpolator (according to the XNA microcode validator -
+    // limited to the interpolator count, 16, not the total register count of
+    // 64) index to write pixel parameters to.
+    // See https://portal.unifiedpatents.com/ptab/case/IPR2015-00325 Exhibit
+    // 2039 R400 Sequencer Specification 2.11 (a significantly early version of
+    // the specification, however) section 19.2 "Sprites/ XY screen coordinates/
+    // FB information" for additional details.
+    // * |XY| - position on screen (vPos - the XNA assembler translates ps_3_0
+    //   vPos directly to this, so at least in Direct3D 9 pixel center mode,
+    //   this contains 0, 1, 2, not 0.5, 1.5, 2.5). flto also said in the
     //   Freedreno IRC that it's .0 even in OpenGL:
     //   https://dri.freedesktop.org/~cbrill/dri-log/?channel=freedreno&date=2020-04-19
-    //   (on Android, according to LG P705 GL_OES_get_program_binary
-    //   disassembly, gl_FragCoord.xy is |r0.xy| * c221.xy + c222.zw - haven't
-    //   been able to dump the constant values by exploiting a huge uniform
-    //   array, but flto says c222.zw contains tile offset plus 0.5).
-    // * Sign bit of X - is front face (vFace), non-negative for front face,
-    //   negative for back face (used with `rcpc` in shaders to take signedness
-    //   of 0 into account in `cndge`).
-    // * |ZW| - UV within a point sprite (sign meaning is unknown so far).
+    //   According to the actual usage, in the final version of the hardware,
+    //   the screen coordinates are passed to the shader directly as floats
+    //   (contrary to what's written in the early 2.11 version of the sequencer
+    //   specification from IPR2015-00325, where the coordinates are specified
+    //   to be 2^23-biased, essentially packed as integers in the low mantissa
+    //   bits of 2^23).
+    //   * On Android, according to LG P705 - checked on the driver V@6.0 AU@
+    //     (CL@3050818) - GL_OES_get_program_binary disassembly, gl_FragCoord.xy
+    //     is |r0.xy| * c221.xy + c222.zw. Though we haven't yet been able to
+    //     dump the actual constant values by exploiting a huge uniform array,
+    //     but flto says c222.zw contains tile offset plus 0.5. It also appears
+    //     that the multiplication by c221.xy is done to flip the direction of
+    //     the Y axis in gl_FragCoord (c221.y is probably -1). According to the
+    //     tests performed with triangles and point sprites, the hardware uses
+    //     the top-left rasterization rule just like Direct3D (tie-breaking
+    //     sample coverage towards gl_FragCoord.-x+y, while Direct3D tie-breaks
+    //     towards VPOS.-x-y), and the R400 / Z430 doesn't seem to have the
+    //     equivalent of R5xx's SC_EDGERULE register for configuring this).
+    //     Also, both OpenGL and apparently Direct3D 9 define the point sprite V
+    //     coordinate to be 0 in the top, and 1 in the bottom (but OpenGL
+    //     gl_FragCoord.y is towards the top, while Direct3D 9's VPOS.y is
+    //     towards the bottom), gl_PointCoord.y is |PsParamGen.w| directly, and
+    //     the R400 / Z430 doesn't appear to have an equivalent of R6xx's
+    //     SPI_INTERP_CONTROL_0::PNT_SPRITE_TOP_1 for toggling the direction.
+    //     So, it looks like the internal screen coordinates in the official
+    //     OpenGL ES 2.0 driver are still top-to-bottom like in Direct3D, but
+    //     gl_FragCoord.y is flipped in the shader code so it's bottom-to-top
+    //     as OpenGL specifies.
+    //     https://docs.microsoft.com/en-us/windows/win32/direct3d9/point-sprites
+    // * |ZW| - UV within a point sprite, [0, 1]. In OpenGL ES 2.0, this is
+    //   interpreted directly as gl_PointCoord, with the directions matching the
+    //   OpenGL ES 2.0 specification - 0 in the top (towards +gl_FragCoord.y in
+    //   OpenGL ES bottom-to-top screen coordinates - but towards -PsParamGen.y
+    //   likely, see the explanation of gl_FragCoord.xy above), 1 in the bottom
+    //   (towards -gl_FragCoord.y, or +PsParamGen.y likely). The point sprite
+    //   coordinates are exposed differently on the Xbox 360 and the PC
+    //   Direct3D 9 - the Xbox 360 passes the whole PsParamGen register via the
+    //   SPRITETEXCOORD input semantic directly (unlike on the PC, where point
+    //   sprite coordinates are written to XY of TEXCOORD0), and shaders should
+    //   take abs(SPRITETEXCOORD.zw) explicitly.
+    //   https://shawnhargreaves.com/blog/point-sprites-on-xbox.html
+    //   4D5307F1 has snowflake point sprites with an asymmetric texture.
+    //   * For non-point primitives, according to LG P705, this may be the IJ
+    //     barycentric coordinates, however, it's not yet known how intentional,
+    //     well-defined and reliable this behavior is, and whether any game uses
+    //     it on purpose. Also, the mapping between the vertex indices and the
+    //     order of these coordinates seems to vary possibly depending on the
+    //     positions of the vertices relative to each other even when the
+    //     winding order stays the same. It's also unknown what effect the
+    //     provoking vertex convention has on the order.
+    // TODO(Triang3l): Research the order, as well as the sampling location, of
+    // PsParamGen.zw, the behavior (whether they're extrapolated) when the
+    // center of the pixel is not covered, on the real hardware.
+    // * Sign bit of X - is front face (according to the disassembly of vFace
+    //   and gl_FrontFacing usage), non-negative for front face, negative for
+    //   back face (used with `rcpc` in shaders to take signedness of 0 into
+    //   account in `cndge`).
+    // * Sign bit of Y - is the primitive type a point (according to the
+    //   IPR2015-00325 sequencer specification), negative for a point,
+    //   non-negative for other primitive types.
+    // * Sign bit of Z - is the primitive type a line (according to the
+    //   IPR2015-00325 sequencer specification), negative for a line,
+    //   non-negative for other primitive types.
     uint32_t param_gen_pos : 8;    // +8
     uint32_t perfcounter_ref : 1;  // +16
     uint32_t yeild_optimize : 1;   // +17 sic
     uint32_t tx_cache_sel : 1;     // +18
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_SQ_CONTEXT_MISC;
 };
 static_assert_size(SQ_CONTEXT_MISC, sizeof(uint32_t));
 
 union alignas(uint32_t) SQ_INTERPOLATOR_CNTL {
+  uint32_t value;
   struct {
     uint32_t param_shade : 16;  // +0
     // SampleLocation bits - 0 for centroid, 1 for center, if
     // SQ_CONTEXT_MISC::sc_sample_cntl is kCentroidsAndCenters.
     uint32_t sampling_pattern : 16;  // +16
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_SQ_INTERPOLATOR_CNTL;
 };
 static_assert_size(SQ_INTERPOLATOR_CNTL, sizeof(uint32_t));
+
+union alignas(uint32_t) SQ_VS_CONST {
+  uint32_t value;
+  struct {
+    uint32_t base : 9;  // +0
+    uint32_t : 3;       // +9
+    // Vec4 count minus one.
+    uint32_t size : 9;  // 12
+  };
+  static constexpr Register register_index = XE_GPU_REG_SQ_VS_CONST;
+};
+static_assert_size(SQ_VS_CONST, sizeof(uint32_t));
+
+// Same as SQ_VS_CONST.
+union alignas(uint32_t) SQ_PS_CONST {
+  uint32_t value;
+  struct {
+    uint32_t base : 9;  // +0
+    uint32_t : 3;       // +9
+    // Vec4 count minus one.
+    uint32_t size : 9;  // 12
+  };
+  static constexpr Register register_index = XE_GPU_REG_SQ_PS_CONST;
+};
+static_assert_size(SQ_PS_CONST, sizeof(uint32_t));
 
 /*******************************************************************************
  __   _____ ___ _____ _____  __
@@ -186,16 +270,17 @@ static_assert_size(SQ_INTERPOLATOR_CNTL, sizeof(uint32_t));
 *******************************************************************************/
 
 union alignas(uint32_t) VGT_DMA_SIZE {
+  uint32_t value;
   struct {
     uint32_t num_words : 24;      // +0
     uint32_t : 6;                 // +24
     xenos::Endian swap_mode : 2;  // +30
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_VGT_DMA_SIZE;
 };
 
 union alignas(uint32_t) VGT_DRAW_INITIATOR {
+  uint32_t value;
   // Different than on A2xx and R6xx/R7xx.
   struct {
     xenos::PrimitiveType prim_type : 6;     // +0
@@ -207,7 +292,6 @@ union alignas(uint32_t) VGT_DRAW_INITIATOR {
     uint32_t : 3;                           // +13
     uint32_t num_indices : 16;              // +16
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_VGT_DRAW_INITIATOR;
 };
 static_assert_size(VGT_DRAW_INITIATOR, sizeof(uint32_t));
@@ -223,6 +307,7 @@ static_assert_size(VGT_DRAW_INITIATOR, sizeof(uint32_t));
 // clamping.
 
 union alignas(uint32_t) VGT_MULTI_PRIM_IB_RESET_INDX {
+  uint32_t value;
   struct {
     // The upper 8 bits of the value from the index buffer are confirmed to be
     // ignored. So, though this specifically is untested (because
@@ -234,13 +319,13 @@ union alignas(uint32_t) VGT_MULTI_PRIM_IB_RESET_INDX {
     // 0x1FFFFFF, 0xFFFFFFFF all cause primitive reset.
     uint32_t reset_indx : 24;
   };
-  uint32_t value;
   static constexpr Register register_index =
       XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX;
 };
 static_assert_size(VGT_MULTI_PRIM_IB_RESET_INDX, sizeof(uint32_t));
 
 union alignas(uint32_t) VGT_INDX_OFFSET {
+  uint32_t value;
   struct {
     // Unlike R5xx's VAP_INDEX_OFFSET, which is signed 25-bit, this is 24-bit -
     // and signedness doesn't matter as index calculations are done in 24-bit
@@ -251,44 +336,43 @@ union alignas(uint32_t) VGT_INDX_OFFSET {
     // anyway, and that has no effect on offsets that fit in 24 bits.
     uint32_t indx_offset : 24;
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_VGT_INDX_OFFSET;
 };
 static_assert_size(VGT_INDX_OFFSET, sizeof(uint32_t));
 
 union alignas(uint32_t) VGT_MIN_VTX_INDX {
+  uint32_t value;
   struct {
     uint32_t min_indx : 24;
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_VGT_MIN_VTX_INDX;
 };
 static_assert_size(VGT_MIN_VTX_INDX, sizeof(uint32_t));
 
 union alignas(uint32_t) VGT_MAX_VTX_INDX {
+  uint32_t value;
   struct {
     // Usually 0xFFFF or 0xFFFFFF.
     uint32_t max_indx : 24;
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_VGT_MAX_VTX_INDX;
 };
 static_assert_size(VGT_MAX_VTX_INDX, sizeof(uint32_t));
 
 union alignas(uint32_t) VGT_OUTPUT_PATH_CNTL {
+  uint32_t value;
   struct {
     xenos::VGTOutputPath path_select : 2;  // +0
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_VGT_OUTPUT_PATH_CNTL;
 };
 static_assert_size(VGT_OUTPUT_PATH_CNTL, sizeof(uint32_t));
 
 union alignas(uint32_t) VGT_HOS_CNTL {
+  uint32_t value;
   struct {
     xenos::TessellationMode tess_mode : 2;  // +0
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_VGT_HOS_CNTL;
 };
 static_assert_size(VGT_HOS_CNTL, sizeof(uint32_t));
@@ -307,29 +391,30 @@ static_assert_size(VGT_HOS_CNTL, sizeof(uint32_t));
 *******************************************************************************/
 
 union alignas(uint32_t) PA_SU_POINT_MINMAX {
+  uint32_t value;
   struct {
-    // Radius, 12.4 fixed point.
+    // For per-vertex size specification, radius (1/2 size), 12.4 fixed point.
     uint32_t min_size : 16;  // +0
     uint32_t max_size : 16;  // +16
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_PA_SU_POINT_MINMAX;
 };
 static_assert_size(PA_SU_POINT_MINMAX, sizeof(uint32_t));
 
 union alignas(uint32_t) PA_SU_POINT_SIZE {
+  uint32_t value;
   struct {
     // 1/2 width or height, 12.4 fixed point.
     uint32_t height : 16;  // +0
     uint32_t width : 16;   // +16
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_PA_SU_POINT_SIZE;
 };
 static_assert_size(PA_SU_POINT_SIZE, sizeof(uint32_t));
 
 // Setup Unit / Scanline Converter mode cntl
 union alignas(uint32_t) PA_SU_SC_MODE_CNTL {
+  uint32_t value;
   struct {
     uint32_t cull_front : 1;  // +0
     uint32_t cull_back : 1;   // +1
@@ -359,36 +444,36 @@ union alignas(uint32_t) PA_SU_SC_MODE_CNTL {
     // WAIT_RB_IDLE_ALL_TRI and WAIT_RB_IDLE_FIRST_TRI_NEW_STATE were added on
     // Adreno.
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_PA_SU_SC_MODE_CNTL;
 };
 static_assert_size(PA_SU_SC_MODE_CNTL, sizeof(uint32_t));
 
 // Setup Unit Vertex Control
 union alignas(uint32_t) PA_SU_VTX_CNTL {
+  uint32_t value;
   struct {
     uint32_t pix_center : 1;  // +0 1 = half pixel offset (OpenGL).
     uint32_t round_mode : 2;  // +1
     uint32_t quant_mode : 3;  // +3
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_PA_SU_VTX_CNTL;
 };
 static_assert_size(PA_SU_VTX_CNTL, sizeof(uint32_t));
 
 union alignas(uint32_t) PA_SC_MPASS_PS_CNTL {
+  uint32_t value;
   struct {
     uint32_t mpass_pix_vec_per_pass : 20;  // +0
     uint32_t : 11;                         // +20
     uint32_t mpass_ps_ena : 1;             // +31
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_PA_SC_MPASS_PS_CNTL;
 };
 static_assert_size(PA_SC_MPASS_PS_CNTL, sizeof(uint32_t));
 
 // Scanline converter viz query, used by D3D for gpu side conditional rendering
 union alignas(uint32_t) PA_SC_VIZ_QUERY {
+  uint32_t value;
   struct {
     // the visibility of draws should be evaluated
     uint32_t viz_query_ena : 1;  // +0
@@ -398,13 +483,13 @@ union alignas(uint32_t) PA_SC_VIZ_QUERY {
     // not used with d3d
     uint32_t kill_pix_post_detail_mask : 1;  // +8
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_PA_SC_VIZ_QUERY;
 };
 static_assert_size(PA_SC_VIZ_QUERY, sizeof(uint32_t));
 
 // Clipper clip control
 union alignas(uint32_t) PA_CL_CLIP_CNTL {
+  uint32_t value;
   struct {
     uint32_t ucp_ena_0 : 1;               // +0
     uint32_t ucp_ena_1 : 1;               // +1
@@ -424,13 +509,16 @@ union alignas(uint32_t) PA_CL_CLIP_CNTL {
     uint32_t z_nan_retain : 1;            // +23
     uint32_t w_nan_retain : 1;            // +24
   };
-  uint32_t value;
+  struct {
+    uint32_t ucp_ena : 6;
+  };
   static constexpr Register register_index = XE_GPU_REG_PA_CL_CLIP_CNTL;
 };
 static_assert_size(PA_CL_CLIP_CNTL, sizeof(uint32_t));
 
 // Viewport transform engine control
 union alignas(uint32_t) PA_CL_VTE_CNTL {
+  uint32_t value;
   struct {
     uint32_t vport_x_scale_ena : 1;   // +0
     uint32_t vport_x_offset_ena : 1;  // +1
@@ -444,45 +532,45 @@ union alignas(uint32_t) PA_CL_VTE_CNTL {
     uint32_t vtx_w0_fmt : 1;          // +10
     uint32_t perfcounter_ref : 1;     // +11
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_PA_CL_VTE_CNTL;
 };
 static_assert_size(PA_CL_VTE_CNTL, sizeof(uint32_t));
 
 union alignas(uint32_t) PA_SC_SCREEN_SCISSOR_TL {
+  uint32_t value;
   struct {
     int32_t tl_x : 15;  // +0
     uint32_t : 1;       // +15
     int32_t tl_y : 15;  // +16
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL;
 };
 static_assert_size(PA_SC_SCREEN_SCISSOR_TL, sizeof(uint32_t));
 
 union alignas(uint32_t) PA_SC_SCREEN_SCISSOR_BR {
+  uint32_t value;
   struct {
     int32_t br_x : 15;  // +0
     uint32_t : 1;       // +15
     int32_t br_y : 15;  // +16
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR;
 };
 static_assert_size(PA_SC_SCREEN_SCISSOR_BR, sizeof(uint32_t));
 
 union alignas(uint32_t) PA_SC_WINDOW_OFFSET {
+  uint32_t value;
   struct {
     int32_t window_x_offset : 15;  // +0
     uint32_t : 1;                  // +15
     int32_t window_y_offset : 15;  // +16
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_PA_SC_WINDOW_OFFSET;
 };
 static_assert_size(PA_SC_WINDOW_OFFSET, sizeof(uint32_t));
 
 union alignas(uint32_t) PA_SC_WINDOW_SCISSOR_TL {
+  uint32_t value;
   struct {
     uint32_t tl_x : 14;                  // +0
     uint32_t : 2;                        // +14
@@ -490,18 +578,17 @@ union alignas(uint32_t) PA_SC_WINDOW_SCISSOR_TL {
     uint32_t : 1;                        // +30
     uint32_t window_offset_disable : 1;  // +31
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL;
 };
 static_assert_size(PA_SC_WINDOW_SCISSOR_TL, sizeof(uint32_t));
 
 union alignas(uint32_t) PA_SC_WINDOW_SCISSOR_BR {
+  uint32_t value;
   struct {
     uint32_t br_x : 14;  // +0
     uint32_t : 2;        // +14
     uint32_t br_y : 14;  // +16
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR;
 };
 static_assert_size(PA_SC_WINDOW_SCISSOR_BR, sizeof(uint32_t));
@@ -520,33 +607,38 @@ static_assert_size(PA_SC_WINDOW_SCISSOR_BR, sizeof(uint32_t));
 *******************************************************************************/
 
 union alignas(uint32_t) RB_MODECONTROL {
+  uint32_t value;
   struct {
     xenos::ModeControl edram_mode : 3;  // +0
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_RB_MODECONTROL;
 };
 static_assert_size(RB_MODECONTROL, sizeof(uint32_t));
 
 union alignas(uint32_t) RB_SURFACE_INFO {
+  uint32_t value;
   struct {
     uint32_t surface_pitch : 14;          // +0 in pixels.
     uint32_t : 2;                         // +14
     xenos::MsaaSamples msaa_samples : 2;  // +16
     uint32_t hiz_pitch : 14;              // +18
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_RB_SURFACE_INFO;
 };
 static_assert_size(RB_SURFACE_INFO, sizeof(uint32_t));
 
 union alignas(uint32_t) RB_COLORCONTROL {
+  uint32_t value;
   struct {
     xenos::CompareFunction alpha_func : 3;  // +0
     uint32_t alpha_test_enable : 1;         // +3
     uint32_t alpha_to_mask_enable : 1;      // +4
     // Everything in between was added on Adreno.
     uint32_t : 19;  // +5
+    // TODO(Triang3l): Redo these tests and possibly flip these vertically in
+    // the comment and in the actual implementation. It appears that
+    // gl_FragCoord.y is mirrored as opposed to the actual screen coordinates in
+    // the rasterizer (see the SQ_CONTEXT_MISC::param_gen_pos comment here).
     // According to tests on an Adreno 200 device (LG Optimus L7), done by
     // drawing 0.5x0.5 rectangles in different corners of four pixels in a quad
     // to a multisampled GLSurfaceView, the coverage mask is the following for 4
@@ -585,19 +677,22 @@ union alignas(uint32_t) RB_COLORCONTROL {
     uint32_t alpha_to_mask_offset2 : 2;  // +28
     uint32_t alpha_to_mask_offset3 : 2;  // +30
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_RB_COLORCONTROL;
 };
 static_assert_size(RB_COLORCONTROL, sizeof(uint32_t));
 
 union alignas(uint32_t) RB_COLOR_INFO {
+  uint32_t value;
   struct {
-    uint32_t color_base : 12;                         // +0 in tiles.
+    // The original R400 structure has 12-bit color_base, however the Xenos has
+    // periodic 11-bit EDRAM tile addressing, so this field was split in Xenia
+    // for convenience and to avoid mistakes.
+    uint32_t color_base : 11;                         // +0 in tiles.
+    uint32_t color_base_bit_11 : 1;                   // +11
     uint32_t : 4;                                     // +12
     xenos::ColorRenderTargetFormat color_format : 4;  // +16
     int32_t color_exp_bias : 6;                       // +20
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_RB_COLOR_INFO;
   // RB_COLOR[1-3]_INFO also use this format.
   static const Register rt_register_indices[4];
@@ -605,6 +700,7 @@ union alignas(uint32_t) RB_COLOR_INFO {
 static_assert_size(RB_COLOR_INFO, sizeof(uint32_t));
 
 union alignas(uint32_t) RB_COLOR_MASK {
+  uint32_t value;
   struct {
     uint32_t write_red0 : 1;    // +0
     uint32_t write_green0 : 1;  // +1
@@ -623,12 +719,12 @@ union alignas(uint32_t) RB_COLOR_MASK {
     uint32_t write_blue3 : 1;   // +14
     uint32_t write_alpha3 : 1;  // +15
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_RB_COLOR_MASK;
 };
 static_assert_size(RB_COLOR_MASK, sizeof(uint32_t));
 
 union alignas(uint32_t) RB_BLENDCONTROL {
+  uint32_t value;
   struct {
     xenos::BlendFactor color_srcblend : 5;   // +0
     xenos::BlendOp color_comb_fcn : 3;       // +5
@@ -639,7 +735,6 @@ union alignas(uint32_t) RB_BLENDCONTROL {
     xenos::BlendFactor alpha_destblend : 5;  // +24
     // BLEND_FORCE_ENABLE and BLEND_FORCE were added on Adreno.
   };
-  uint32_t value;
   // RB_BLENDCONTROL[0-3] use this format.
   static constexpr Register register_index = XE_GPU_REG_RB_BLENDCONTROL0;
   static const Register rt_register_indices[4];
@@ -647,6 +742,7 @@ union alignas(uint32_t) RB_BLENDCONTROL {
 static_assert_size(RB_BLENDCONTROL, sizeof(uint32_t));
 
 union alignas(uint32_t) RB_DEPTHCONTROL {
+  uint32_t value;
   struct {
     uint32_t stencil_enable : 1;  // +0
     uint32_t z_enable : 1;        // +1
@@ -664,30 +760,33 @@ union alignas(uint32_t) RB_DEPTHCONTROL {
     xenos::StencilOp stencilzpass_bf : 3;       // +26
     xenos::StencilOp stencilzfail_bf : 3;       // +29
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_RB_DEPTHCONTROL;
 };
 static_assert_size(RB_DEPTHCONTROL, sizeof(uint32_t));
 
 union alignas(uint32_t) RB_STENCILREFMASK {
+  uint32_t value;
   struct {
     uint32_t stencilref : 8;        // +0
     uint32_t stencilmask : 8;       // +8
     uint32_t stencilwritemask : 8;  // +16
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_RB_STENCILREFMASK;
   // RB_STENCILREFMASK_BF also uses this format.
 };
 static_assert_size(RB_STENCILREFMASK, sizeof(uint32_t));
 
 union alignas(uint32_t) RB_DEPTH_INFO {
+  uint32_t value;
   struct {
-    uint32_t depth_base : 12;                         // +0 in tiles.
+    // The original R400 structure has 12-bit depth_base, however the Xenos has
+    // periodic 11-bit EDRAM tile addressing, so this field was split in Xenia
+    // for convenience and to avoid mistakes.
+    uint32_t depth_base : 11;                         // +0 in tiles.
+    uint32_t depth_base_bit_11 : 1;                   // +11
     uint32_t : 4;                                     // +12
     xenos::DepthRenderTargetFormat depth_format : 1;  // +16
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_RB_DEPTH_INFO;
 };
 static_assert_size(RB_DEPTH_INFO, sizeof(uint32_t));
@@ -695,6 +794,7 @@ static_assert_size(RB_DEPTH_INFO, sizeof(uint32_t));
 // Copy registers are very different than on Adreno.
 
 union alignas(uint32_t) RB_COPY_CONTROL {
+  uint32_t value;
   struct {
     uint32_t copy_src_select : 3;                    // +0 Depth is 4.
     uint32_t : 1;                                    // +3
@@ -705,12 +805,12 @@ union alignas(uint32_t) RB_COPY_CONTROL {
     uint32_t : 10;                                   // +10
     xenos::CopyCommand copy_command : 2;             // +20
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_RB_COPY_CONTROL;
 };
 static_assert_size(RB_COPY_CONTROL, sizeof(uint32_t));
 
 union alignas(uint32_t) RB_COPY_DEST_INFO {
+  uint32_t value;
   struct {
     xenos::Endian128 copy_dest_endian : 3;            // +0
     uint32_t copy_dest_array : 1;                     // +3
@@ -721,21 +821,82 @@ union alignas(uint32_t) RB_COPY_DEST_INFO {
     uint32_t : 2;                                     // +22
     uint32_t copy_dest_swap : 1;                      // +24
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_RB_COPY_DEST_INFO;
 };
 static_assert_size(RB_COPY_DEST_INFO, sizeof(uint32_t));
 
 union alignas(uint32_t) RB_COPY_DEST_PITCH {
+  uint32_t value;
   struct {
     uint32_t copy_dest_pitch : 14;   // +0
     uint32_t : 2;                    // +14
     uint32_t copy_dest_height : 14;  // +16
   };
-  uint32_t value;
   static constexpr Register register_index = XE_GPU_REG_RB_COPY_DEST_PITCH;
 };
 static_assert_size(RB_COPY_DEST_PITCH, sizeof(uint32_t));
+
+/*******************************************************************************
+  ___ ___ ___ ___ _      ___   __
+ |   \_ _/ __| _ \ |    /_\ \ / /
+ | |) | |\__ \  _/ |__ / _ \ V /
+ |___/___|___/_| |____/_/ \_\_|
+
+   ___ ___  _  _ _____ ___  ___  _    _    ___ ___
+  / __/ _ \| \| |_   _| _ \/ _ \| |  | |  | __| _ \
+ | (_| (_) | .` | | | |   / (_) | |__| |__| _||   /
+  \___\___/|_|\_| |_| |_|_\\___/|____|____|___|_|_\
+
+*******************************************************************************/
+
+union alignas(uint32_t) DC_LUT_RW_INDEX {
+  uint32_t value;
+  struct {
+    // Unlike in the M56 documentation, for the 256-table entry, this is the
+    // absolute index, without the lower or upper 10 bits selection in the
+    // bit 0. For PWL, the bit 7 is ignored.
+    uint32_t rw_index : 8;  // +0
+  };
+  static constexpr Register register_index = XE_GPU_REG_DC_LUT_RW_INDEX;
+};
+static_assert_size(DC_LUT_RW_INDEX, sizeof(uint32_t));
+
+union alignas(uint32_t) DC_LUT_SEQ_COLOR {
+  uint32_t value;
+  struct {
+    uint32_t seq_color : 16;  // +0, bits 0:5 are hardwired to zero
+  };
+  static constexpr Register register_index = XE_GPU_REG_DC_LUT_SEQ_COLOR;
+};
+static_assert_size(DC_LUT_SEQ_COLOR, sizeof(uint32_t));
+
+union alignas(uint32_t) DC_LUT_PWL_DATA {
+  uint32_t value;
+  struct {
+    // See the M56 DC_LUTA_CONTROL for information about the way these should be
+    // interpreted (`output = base + (multiplier * delta) / 2^increment`, where
+    // the increment is the value specified in DC_LUTA_CONTROL for the specific
+    // color channel, the base is 7 bits of the front buffer value above
+    // `increment` bits, the multiplier is the lower `increment` bits of it; the
+    // increment is nonzero, otherwise the 256-entry table should be used
+    // instead).
+    uint32_t base : 16;   // +0, bits 0:5 are hardwired to zero
+    uint32_t delta : 16;  // +16, bits 0:5 are hardwired to zero
+  };
+  static constexpr Register register_index = XE_GPU_REG_DC_LUT_PWL_DATA;
+};
+static_assert_size(DC_LUT_PWL_DATA, sizeof(uint32_t));
+
+union alignas(uint32_t) DC_LUT_30_COLOR {
+  uint32_t value;
+  struct {
+    uint32_t color_10_blue : 10;   // +0
+    uint32_t color_10_green : 10;  // +10
+    uint32_t color_10_red : 10;    // +20
+  };
+  static constexpr Register register_index = XE_GPU_REG_DC_LUT_30_COLOR;
+};
+static_assert_size(DC_LUT_30_COLOR, sizeof(uint32_t));
 
 }  // namespace reg
 

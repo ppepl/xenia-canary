@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -20,6 +20,28 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_rtl.h"
 #include "xenia/xbox.h"
 
+DEFINE_int32(internal_display_resolution, 8,
+             "Allow game that support different resolutions to be rendered "
+             "in specific resolution."
+             "   0=640x480\n"
+             "   1=640x576\n"
+             "   2=720x480\n"
+             "   3=720x576\n"
+             "   4=800x600\n"
+             "   5=848x480\n"
+             "   6=1024x768\n"
+             "   7=1152x864\n"
+             "   8=1280x720 (Default)\n"
+             "   9=1280x768\n"
+             "   10=1280x960\n"
+             "   11=1280x1024\n"
+             "   12=1360x768\n"
+             "   13=1440x900\n"
+             "   14=1680x1050\n"
+             "   15=1920x540\n"
+             "   16=1920x1080\n",
+             "Display");
+
 // BT.709 on modern monitors and TVs looks the closest to the Xbox 360 connected
 // to an HDTV.
 DEFINE_uint32(kernel_display_gamma_type, 2,
@@ -30,6 +52,22 @@ UPDATE_from_uint32(kernel_display_gamma_type, 2020, 12, 31, 13, 1);
 DEFINE_double(kernel_display_gamma_power, 2.22222233,
               "Display gamma to use with kernel_display_gamma_type 3.",
               "Kernel");
+
+static const std::vector<std::pair<uint16_t, uint16_t>>
+    internal_display_resolution_entries = {
+        {640, 480},  {640, 576},   {720, 480},  {720, 576},  {800, 600},
+        {848, 480},  {1024, 768},  {1152, 864}, {1280, 720}, {1280, 768},
+        {1280, 960}, {1280, 1024}, {1360, 768}, {1440, 900}, {1680, 1050},
+        {1920, 540}, {1920, 1080}};
+
+std::pair<uint16_t, uint16_t> GetInternalDisplayResolution() {
+  if (cvars::internal_display_resolution >
+      internal_display_resolution_entries.size()) {
+    return internal_display_resolution_entries[8];
+  }
+  return internal_display_resolution_entries
+      [cvars::internal_display_resolution];
+}
 
 namespace xe {
 namespace kernel {
@@ -48,7 +86,7 @@ namespace xboxkrnl {
 // https://www.microsoft.com/en-za/download/details.aspx?id=5313 -- "Stripped
 // Down Direct3D: Xbox 360 Command Buffer and Resource Management"
 
-void VdGetCurrentDisplayGamma(lpdword_t type_ptr, lpfloat_t power_ptr) {
+void VdGetCurrentDisplayGamma_entry(lpdword_t type_ptr, lpfloat_t power_ptr) {
   // 1 - sRGB.
   // 2 - TV (BT.709).
   // 3 - use the power written to *power_ptr.
@@ -104,9 +142,8 @@ struct X_DISPLAY_INFO {
 };
 static_assert_size(X_DISPLAY_INFO, 0x58);
 
-void VdQueryVideoMode(pointer_t<X_VIDEO_MODE> video_mode);
-
-void VdGetCurrentDisplayInformation(pointer_t<X_DISPLAY_INFO> display_info) {
+void VdGetCurrentDisplayInformation_entry(
+    pointer_t<X_DISPLAY_INFO> display_info) {
   X_VIDEO_MODE mode;
   VdQueryVideoMode(&mode);
 
@@ -132,23 +169,30 @@ void VdGetCurrentDisplayInformation(pointer_t<X_DISPLAY_INFO> display_info) {
 }
 DECLARE_XBOXKRNL_EXPORT1(VdGetCurrentDisplayInformation, kVideo, kStub);
 
-void VdQueryVideoMode(pointer_t<X_VIDEO_MODE> video_mode) {
+void VdQueryVideoMode(X_VIDEO_MODE* video_mode) {
   // TODO(benvanik): get info from actual display.
-  video_mode.Zero();
-  video_mode->display_width = 1280;
-  video_mode->display_height = 720;
+  std::memset(video_mode, 0, sizeof(X_VIDEO_MODE));
+
+  auto display_res = GetInternalDisplayResolution();
+
+  video_mode->display_width = display_res.first;
+  video_mode->display_height = display_res.second;
   video_mode->is_interlaced = 0;
-  video_mode->is_widescreen = ((video_mode->display_width / 4) >
-                              (video_mode->display_height / 3));
+  video_mode->is_widescreen =
+      ((video_mode->display_width / 4) > (video_mode->display_height / 3));
   video_mode->is_hi_def = 1;
   video_mode->refresh_rate = 60.0f;
   video_mode->video_standard = 1;  // NTSC
   video_mode->unknown_0x8a = 0x4A;
   video_mode->unknown_0x01 = 0x01;
 }
+
+void VdQueryVideoMode_entry(pointer_t<X_VIDEO_MODE> video_mode) {
+  VdQueryVideoMode(video_mode);
+}
 DECLARE_XBOXKRNL_EXPORT1(VdQueryVideoMode, kVideo, kStub);
 
-dword_result_t VdQueryVideoFlags() {
+dword_result_t VdQueryVideoFlags_entry() {
   X_VIDEO_MODE mode;
   VdQueryVideoMode(&mode);
 
@@ -161,7 +205,7 @@ dword_result_t VdQueryVideoFlags() {
 }
 DECLARE_XBOXKRNL_EXPORT1(VdQueryVideoFlags, kVideo, kStub);
 
-dword_result_t VdSetDisplayMode(dword_t flags) {
+dword_result_t VdSetDisplayMode_entry(dword_t flags) {
   // Often 0x40000000.
 
   // 0?ccf000 00000000 00000000 000000r0
@@ -180,17 +224,17 @@ dword_result_t VdSetDisplayMode(dword_t flags) {
 }
 DECLARE_XBOXKRNL_EXPORT1(VdSetDisplayMode, kVideo, kStub);
 
-dword_result_t VdSetDisplayModeOverride(unknown_t unk0, unknown_t unk1,
-                                        double_t refresh_rate, unknown_t unk3,
-                                        unknown_t unk4) {
+dword_result_t VdSetDisplayModeOverride_entry(unknown_t unk0, unknown_t unk1,
+                                              double_t refresh_rate,
+                                              unknown_t unk3, unknown_t unk4) {
   // refresh_rate = 0, 50, 59.9, etc.
   return 0;
 }
 DECLARE_XBOXKRNL_EXPORT1(VdSetDisplayModeOverride, kVideo, kStub);
 
-dword_result_t VdInitializeEngines(unknown_t unk0, function_t callback,
-                                   lpvoid_t arg, lpdword_t pfp_ptr,
-                                   lpdword_t me_ptr) {
+dword_result_t VdInitializeEngines_entry(unknown_t unk0, function_t callback,
+                                         lpvoid_t arg, lpdword_t pfp_ptr,
+                                         lpdword_t me_ptr) {
   // r3 = 0x4F810000
   // r4 = function ptr (cleanup callback?)
   // r5 = function arg
@@ -200,27 +244,28 @@ dword_result_t VdInitializeEngines(unknown_t unk0, function_t callback,
 }
 DECLARE_XBOXKRNL_EXPORT1(VdInitializeEngines, kVideo, kStub);
 
-void VdShutdownEngines() {
+void VdShutdownEngines_entry() {
   // Ignored for now.
   // Games seem to call an Initialize/Shutdown pair to query info, then
   // re-initialize.
 }
 DECLARE_XBOXKRNL_EXPORT1(VdShutdownEngines, kVideo, kStub);
 
-dword_result_t VdGetGraphicsAsicID() {
+dword_result_t VdGetGraphicsAsicID_entry() {
   // Games compare for < 0x10 and do VdInitializeEDRAM, else other
   // (retrain/etc).
   return 0x11;
 }
 DECLARE_XBOXKRNL_EXPORT1(VdGetGraphicsAsicID, kVideo, kStub);
 
-dword_result_t VdEnableDisableClockGating(dword_t enabled) {
+dword_result_t VdEnableDisableClockGating_entry(dword_t enabled) {
   // Ignored, as it really doesn't matter.
   return 0;
 }
 DECLARE_XBOXKRNL_EXPORT1(VdEnableDisableClockGating, kVideo, kStub);
 
-void VdSetGraphicsInterruptCallback(function_t callback, lpvoid_t user_data) {
+void VdSetGraphicsInterruptCallback_entry(function_t callback,
+                                          lpvoid_t user_data) {
   // callback takes 2 params
   // r3 = bool 0/1 - 0 is normal interrupt, 1 is some acquire/lock mumble
   // r4 = user_data (r4 of VdSetGraphicsInterruptCallback)
@@ -229,7 +274,7 @@ void VdSetGraphicsInterruptCallback(function_t callback, lpvoid_t user_data) {
 }
 DECLARE_XBOXKRNL_EXPORT1(VdSetGraphicsInterruptCallback, kVideo, kImplemented);
 
-void VdInitializeRingBuffer(lpvoid_t ptr, int_t size_log2) {
+void VdInitializeRingBuffer_entry(lpvoid_t ptr, int_t size_log2) {
   // r3 = result of MmGetPhysicalAddress
   // r4 = log2(size)
   // Buffer pointers are from MmAllocatePhysicalMemory with WRITE_COMBINE.
@@ -238,21 +283,22 @@ void VdInitializeRingBuffer(lpvoid_t ptr, int_t size_log2) {
 }
 DECLARE_XBOXKRNL_EXPORT1(VdInitializeRingBuffer, kVideo, kImplemented);
 
-void VdEnableRingBufferRPtrWriteBack(lpvoid_t ptr, int_t block_size_log2) {
+void VdEnableRingBufferRPtrWriteBack_entry(lpvoid_t ptr,
+                                           int_t block_size_log2) {
   // r4 = log2(block size), 6, usually --- <=19
   auto graphics_system = kernel_state()->emulator()->graphics_system();
   graphics_system->EnableReadPointerWriteBack(ptr, block_size_log2);
 }
 DECLARE_XBOXKRNL_EXPORT1(VdEnableRingBufferRPtrWriteBack, kVideo, kImplemented);
 
-void VdGetSystemCommandBuffer(lpunknown_t p0_ptr, lpunknown_t p1_ptr) {
+void VdGetSystemCommandBuffer_entry(lpunknown_t p0_ptr, lpunknown_t p1_ptr) {
   p0_ptr.Zero(0x94);
   xe::store_and_swap<uint32_t>(p0_ptr, 0xBEEF0000);
   xe::store_and_swap<uint32_t>(p1_ptr, 0xBEEF0001);
 }
 DECLARE_XBOXKRNL_EXPORT1(VdGetSystemCommandBuffer, kVideo, kStub);
 
-void VdSetSystemCommandBufferGpuIdentifierAddress(lpunknown_t unk) {
+void VdSetSystemCommandBufferGpuIdentifierAddress_entry(lpunknown_t unk) {
   // r3 = 0x2B10(d3d?) + 8
 }
 DECLARE_XBOXKRNL_EXPORT1(VdSetSystemCommandBufferGpuIdentifierAddress, kVideo,
@@ -263,7 +309,7 @@ DECLARE_XBOXKRNL_EXPORT1(VdSetSystemCommandBufferGpuIdentifierAddress, kVideo,
 // r4 = 19
 // no op?
 
-dword_result_t VdInitializeScalerCommandBuffer(
+dword_result_t VdInitializeScalerCommandBuffer_entry(
     dword_t scaler_source_xy,      // ((uint16_t)y << 16) | (uint16_t)x
     dword_t scaler_source_wh,      // ((uint16_t)h << 16) | (uint16_t)w
     dword_t scaled_output_xy,      // ((uint16_t)y << 16) | (uint16_t)x
@@ -303,7 +349,7 @@ void AppendParam(StringBuffer* string_buffer, pointer_t<BufferScaling> param) {
       uint16_t(param->fb_width), uint16_t(param->fb_height));
 }
 
-dword_result_t VdCallGraphicsNotificationRoutines(
+dword_result_t VdCallGraphicsNotificationRoutines_entry(
     unknown_t unk0, pointer_t<BufferScaling> args_ptr) {
   assert_true(unk0 == 1);
 
@@ -314,13 +360,13 @@ dword_result_t VdCallGraphicsNotificationRoutines(
 DECLARE_XBOXKRNL_EXPORT2(VdCallGraphicsNotificationRoutines, kVideo,
                          kImplemented, kSketchy);
 
-dword_result_t VdIsHSIOTrainingSucceeded() {
+dword_result_t VdIsHSIOTrainingSucceeded_entry() {
   // BOOL return value
   return 1;
 }
 DECLARE_XBOXKRNL_EXPORT1(VdIsHSIOTrainingSucceeded, kVideo, kStub);
 
-dword_result_t VdPersistDisplay(unknown_t unk0, lpdword_t unk1_ptr) {
+dword_result_t VdPersistDisplay_entry(unknown_t unk0, lpdword_t unk1_ptr) {
   // unk1_ptr needs to be populated with a pointer passed to
   // MmFreePhysicalMemory(1, *unk1_ptr).
   if (unk1_ptr) {
@@ -335,23 +381,25 @@ dword_result_t VdPersistDisplay(unknown_t unk0, lpdword_t unk1_ptr) {
 }
 DECLARE_XBOXKRNL_EXPORT2(VdPersistDisplay, kVideo, kImplemented, kSketchy);
 
-dword_result_t VdRetrainEDRAMWorker(unknown_t unk0) { return 0; }
+dword_result_t VdRetrainEDRAMWorker_entry(unknown_t unk0) { return 0; }
 DECLARE_XBOXKRNL_EXPORT1(VdRetrainEDRAMWorker, kVideo, kStub);
 
-dword_result_t VdRetrainEDRAM(unknown_t unk0, unknown_t unk1, unknown_t unk2,
-                              unknown_t unk3, unknown_t unk4, unknown_t unk5) {
+dword_result_t VdRetrainEDRAM_entry(unknown_t unk0, unknown_t unk1,
+                                    unknown_t unk2, unknown_t unk3,
+                                    unknown_t unk4, unknown_t unk5) {
   return 0;
 }
 DECLARE_XBOXKRNL_EXPORT1(VdRetrainEDRAM, kVideo, kStub);
 
-void VdSwap(lpvoid_t buffer_ptr,  // ptr into primary ringbuffer
-            lpvoid_t fetch_ptr,   // frontbuffer Direct3D 9 texture header fetch
-            lpunknown_t unk2,     // system writeback ptr
-            lpunknown_t unk3,     // buffer from VdGetSystemCommandBuffer
-            lpunknown_t unk4,     // from VdGetSystemCommandBuffer (0xBEEF0001)
-            lpdword_t frontbuffer_ptr,  // ptr to frontbuffer address
-            lpdword_t texture_format_ptr, lpdword_t color_space_ptr,
-            lpdword_t width, lpdword_t height) {
+void VdSwap_entry(
+    lpvoid_t buffer_ptr,        // ptr into primary ringbuffer
+    lpvoid_t fetch_ptr,         // frontbuffer Direct3D 9 texture header fetch
+    lpunknown_t unk2,           // system writeback ptr
+    lpunknown_t unk3,           // buffer from VdGetSystemCommandBuffer
+    lpunknown_t unk4,           // from VdGetSystemCommandBuffer (0xBEEF0001)
+    lpdword_t frontbuffer_ptr,  // ptr to frontbuffer address
+    lpdword_t texture_format_ptr, lpdword_t color_space_ptr, lpdword_t width,
+    lpdword_t height) {
   // All of these parameters are REQUIRED.
   assert(buffer_ptr);
   assert(fetch_ptr);
@@ -385,7 +433,7 @@ void VdSwap(lpvoid_t buffer_ptr,  // ptr into primary ringbuffer
     return;
   }
   gpu_fetch.base_address = frontbuffer_physical_address >> 12;
-
+  XE_MAYBE_UNUSED
   auto texture_format = gpu::xenos::TextureFormat(texture_format_ptr.value());
   auto color_space = *color_space_ptr;
   assert_true(texture_format == gpu::xenos::TextureFormat::k_8_8_8_8 ||
@@ -427,7 +475,8 @@ void VdSwap(lpvoid_t buffer_ptr,  // ptr into primary ringbuffer
     dwords[i] = xenos::MakePacketType2();
   }
 }
-DECLARE_XBOXKRNL_EXPORT2(VdSwap, kVideo, kImplemented, kImportant);
+DECLARE_XBOXKRNL_EXPORT3(VdSwap, kVideo, kImplemented, kHighFrequency,
+                         kImportant);
 
 void RegisterVideoExports(xe::cpu::ExportResolver* export_resolver,
                           KernelState* kernel_state) {

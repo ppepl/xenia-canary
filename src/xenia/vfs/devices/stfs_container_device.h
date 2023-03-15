@@ -18,6 +18,7 @@
 #include "xenia/base/math.h"
 #include "xenia/base/string_util.h"
 #include "xenia/kernel/util/xex2_info.h"
+#include "xenia/kernel/xam/content_manager.h"
 #include "xenia/vfs/device.h"
 #include "xenia/vfs/devices/stfs_xbox.h"
 
@@ -48,7 +49,9 @@ class StfsContainerDevice : public Device {
 
   const std::string& name() const override { return name_; }
   uint32_t attributes() const override { return 0; }
-  uint32_t component_name_max_length() const override { return 40; }
+  uint32_t component_name_max_length() const override {
+    return component_name_max_length_;
+  }
 
   uint32_t total_allocation_units() const override {
     if (header_.metadata.volume_type == XContentVolumeType::kStfs) {
@@ -80,6 +83,11 @@ class StfsContainerDevice : public Device {
     }
     return files_total_size_ - sizeof(StfsHeader);
   }
+
+  uint32_t title_id() const { return header_.metadata.execution_info.title_id; }
+  XContentType content_type() const { return header_.metadata.content_type; }
+
+  kernel::xam::XCONTENT_AGGREGATE_DATA content_header() const;
 
  private:
   const uint32_t kBlocksPerHashLevel[3] = {170, 28900, 4913000};
@@ -132,6 +140,7 @@ class StfsContainerDevice : public Device {
   size_t files_total_size_;
 
   size_t svod_base_offset_;
+  uint32_t component_name_max_length_;
 
   std::unique_ptr<Entry> root_entry_;
   StfsHeader header_;
