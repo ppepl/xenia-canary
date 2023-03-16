@@ -13,10 +13,10 @@
 #include "xenia/base/platform_win.h"
 #include "xenia/hid/hid_flags.h"
 #include "xenia/hid/input_system.h"
+#include "xenia/ui/virtual_key.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_win.h"
-#include "xenia/ui/virtual_key.h"
 
 #include "xenia/hid/winkey/hookables/goldeneye.h"
 #include "xenia/hid/winkey/hookables/halo3.h"
@@ -241,8 +241,55 @@ bool __inline IsKeyDown(ui::VirtualKey virtual_key) {
   return IsKeyDown(static_cast<uint8_t>(virtual_key));
 }
 
-WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
-    : InputDriver(window), packet_number_(1) {
+void WinKeyInputDriver::ParseKeyBinding(ui::VirtualKey output_key,
+                                        const std::string_view description,
+                                        const std::string_view source_tokens) {
+  for (const std::string_view source_token :
+       utf8::split(source_tokens, " ", true)) {
+    KeyBinding key_binding;
+    key_binding.output_key = output_key;
+
+    std::string_view token = source_token;
+
+    if (utf8::starts_with(token, "_")) {
+      key_binding.lowercase = true;
+      token = token.substr(1);
+    } else if (utf8::starts_with(token, "^")) {
+      key_binding.uppercase = true;
+      token = token.substr(1);
+    }
+
+    if (utf8::starts_with(token, "0x")) {
+      token = token.substr(2);
+      key_binding.input_key = static_cast<ui::VirtualKey>(
+          string_util::from_string<uint16_t>(token, true));
+    } else if (token.size() == 1 && (token[0] >= 'A' && token[0] <= 'Z') ||
+               (token[0] >= '0' && token[0] <= '9')) {
+      key_binding.input_key = static_cast<ui::VirtualKey>(token[0]);
+    }
+
+    if (key_binding.input_key == ui::VirtualKey::kNone) {
+      XELOGW("winkey: failed to parse binding \"{}\" for controller input {}.",
+             source_token, description);
+      continue;
+    }
+
+    key_bindings_.push_back(key_binding);
+    XELOGI("winkey: \"{}\" binds key 0x{:X} to controller input {}.",
+           source_token, key_binding.input_key, description);
+  }
+}
+
+WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window,
+                                     size_t window_z_order)
+    : InputDriver(window, window_z_order), window_input_listener_(*this) {
+#define XE_HID_WINKEY_BINDING(button, description, cvar_name,          \
+                              cvar_default_value)                      \
+  ParseKeyBinding(xe::ui::VirtualKey::kXInputPad##button, description, \
+                  cvars::cvar_name);
+#include "winkey_binding_table.inc"
+#undef XE_HID_WINKEY_BINDING
+
   memset(key_states_, 0, 256);
 
   // Register our supported hookable games
@@ -252,10 +299,11 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
   // Read bindings file if it exists
   std::ifstream binds("bindings.ini");
   if (!binds.is_open()) {
-    MessageBox(((xe::ui::Win32Window*)window)->hwnd(),
+    /*MessageBox(((xe::ui::Win32Window*)window)->hwnd(),
                L"Xenia failed to load bindings.ini file, MouseHook won't have "
                "any keys bound!",
-               L"Xenia", MB_ICONEXCLAMATION | MB_SYSTEMMODAL);
+               L"Xenia", MB_ICONEXCLAMATION | MB_SYSTEMMODAL);*/
+// error C2440: 'type cast': cannot convert from 'overloaded-function' to 'xe::ui::Win32Window *'
   } else {
     std::string cur_section = "default";
     uint32_t cur_game = kTitleIdDefaultBindings;
@@ -338,8 +386,8 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
     MouseEvent mouse;
     mouse.x_delta = evt->x();
     mouse.y_delta = evt->y();
-    mouse.buttons = evt->dx();
-    mouse.wheel_delta = evt->dy();
+    mouse.buttons = evt->scroll_x();
+    mouse.wheel_delta = evt->scroll_y();
     mouse_events_.push(mouse);
 
     {
@@ -385,45 +433,7 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window)
     std::unique_lock<std::mutex> key_lock(key_mutex_);
     key_states_[evt->key_code() & 0xFF] = evt->prev_state();
   });
-
-  window->on_key_down.AddListener([this](ui::KeyEvent* evt) {
-    if (!is_active()) {
-      return;
-    }
-    auto global_lock = global_critical_region_.Acquire();
-
-    KeyEvent key;
-    key.vkey = evt->key_code();
-    key.transition = true;
-    key.prev_state = evt->prev_state();
-    key.repeat_count = evt->repeat_count();
-    key_events_.push(key);
-  });
-  window->on_key_up.AddListener([this](ui::KeyEvent* evt) {
-    if (!is_active()) {
-      return;
-    }
-    auto global_lock = global_critical_region_.Acquire();
-
-    KeyEvent key;
-    key.vkey = evt->key_code();
-    key.transition = false;
-    key.prev_state = evt->prev_state();
-    key.repeat_count = evt->repeat_count();
-    key_events_.push(key);
-  });
-}
-
-WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window,
-                                     size_t window_z_order)
-    : InputDriver(window, window_z_order), window_input_listener_(*this) {
-#define XE_HID_WINKEY_BINDING(button, description, cvar_name,          \
-                              cvar_default_value)                      \
-  ParseKeyBinding(xe::ui::VirtualKey::kXInputPad##button, description, \
-                  cvars::cvar_name);
-#include "winkey_binding_table.inc"
-#undef XE_HID_WINKEY_BINDING
-
+  
   window->AddInputListener(&window_input_listener_, window_z_order);
 }
 
@@ -472,13 +482,13 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
   int16_t thumb_ly = 0;
   int16_t thumb_rx = 0;
   int16_t thumb_ry = 0;
-bool modifier_pressed = false;
+  bool modifier_pressed = false;
 
   X_RESULT result = X_ERROR_SUCCESS;
 
   RawInputState state;
 
-  if (window()->has_focus() && is_active()) {
+  if (window()->HasFocus() && is_active()) {
     {
       std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
       while (!mouse_events_.empty()) {
@@ -581,7 +591,7 @@ bool modifier_pressed = false;
   out_state->gamepad.thumb_rx = thumb_rx;
   out_state->gamepad.thumb_ry = thumb_ry;
 
-    // Check if we have any hooks/injections for the current game
+  // Check if we have any hooks/injections for the current game
   bool game_modifier_handled = false;
   for (auto& game : hookable_games_) {
     if (game->IsGameSupported()) {
@@ -643,7 +653,7 @@ X_RESULT WinKeyInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
     evt = key_events_.front();
     key_events_.pop();
   }
-
+  
   // left stick
   if (evt.vkey == (0x57)) {
     // W
@@ -717,6 +727,7 @@ X_RESULT WinKeyInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
   if (evt.vkey == (0x33)) {
     // 3
     virtual_key = 0x5804;  // VK_PAD_RSHOULDER
+  }
 
   if (virtual_key != 0) {
     if (evt.transition == true) {
@@ -758,7 +769,7 @@ void WinKeyInputDriver::OnKey(ui::KeyEvent& e, bool is_down) {
   }
 
   KeyEvent key;
-  key.virtual_key = e.virtual_key();
+  key.vkey = e.key_code();
   key.transition = is_down;
   key.prev_state = e.prev_state();
   key.repeat_count = e.repeat_count();

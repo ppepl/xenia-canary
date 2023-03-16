@@ -17,6 +17,7 @@
 #include <string>
 #include <utility>
 
+#include "xenia/base/delegate.h"
 #include "xenia/base/platform.h"
 #include "xenia/ui/menu_item.h"
 #include "xenia/ui/presenter.h"
@@ -350,6 +351,9 @@ class Window {
       presenter_->RequestUIPaintFromUIThread();
     }
   }
+  
+  Delegate<MouseEvent*> on_raw_mouse;
+  Delegate<KeyEvent*> on_raw_keyboard;
 
  protected:
   // The receiver, which must never be instantiated in the Window object itself
@@ -430,9 +434,6 @@ class Window {
 
   Window(WindowedAppContext& app_context, const std::string_view title,
          uint32_t desired_logical_width, uint32_t desired_logical_height);
-		 
-  void ForEachListener(std::function<void(WindowListener*)> fn);
-  void TryForEachListener(std::function<bool(WindowListener*)> fn);
 
   // If implementation-specific destruction happens, should be called in the
   // beginning of the implementation's destructor so the implementation can
@@ -588,8 +589,6 @@ class Window {
 
   void OnFileDrop(FileDropEvent& e,
                   WindowDestructionReceiver& destruction_receiver);
-				  
-  void OnGotFocus(UIEvent* e);
 
   void OnKeyDown(KeyEvent& e, WindowDestructionReceiver& destruction_receiver);
   void OnKeyUp(KeyEvent& e, WindowDestructionReceiver& destruction_receiver);
@@ -603,13 +602,14 @@ class Window {
                  WindowDestructionReceiver& destruction_receiver);
   void OnMouseWheel(MouseEvent& e,
                     WindowDestructionReceiver& destruction_receiver);
-  
-  void OnRawMouse(MouseEvent* e);
-  void OnRawKeyboard(KeyEvent* e);
 
   void OnTouchEvent(TouchEvent& e,
                     WindowDestructionReceiver& destruction_receiver);
-
+  
+  void OnRawMouse(MouseEvent& e,
+                    WindowDestructionReceiver& destruction_receiver);
+  void OnRawKeyboard(KeyEvent& e,
+                    WindowDestructionReceiver& destruction_receiver);
  private:
   struct ListenerIterationContext {
     explicit ListenerIterationContext(ListenerIterationContext* outer_context,
@@ -728,11 +728,6 @@ class Window {
   // complex than just a small state update, and recursive painting is
   // completely unsupported by the Presenter.
   bool is_painting_ = false;
-  
-  // All currently-attached listeners that get event notifications.
-  bool in_listener_loop_ = false;
-  std::vector<WindowListener*> pending_listener_attaches_;
-  std::vector<WindowListener*> pending_listener_detaches_;
 };
 
 }  // namespace ui

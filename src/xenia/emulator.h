@@ -241,6 +241,7 @@ const std::unique_ptr<vfs::Device> CreateVfsDeviceBasedOnPath(
   std::filesystem::path storage_root_;
   std::filesystem::path content_root_;
   std::filesystem::path cache_root_;
+  
   std::filesystem::path executable_path_;
 
   std::string title_name_;

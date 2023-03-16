@@ -572,8 +572,8 @@ ImGuiIO& ImGuiDrawer::GetIO() {
 
 void ImGuiDrawer::OnKeyDown(KeyEvent& e) {
   auto& io = GetIO();
-  io.KeysDown[e->key_code()] = true;
-  switch (e->key_code()) {
+  io.KeysDown[e.key_code()] = true;
+  switch (e.key_code()) {
     case 16: {
       io.KeyShift = true;
     } break;
@@ -585,8 +585,8 @@ void ImGuiDrawer::OnKeyDown(KeyEvent& e) {
 
 void ImGuiDrawer::OnKeyUp(KeyEvent& e) {
   auto& io = GetIO();
-  io.KeysDown[e->key_code()] = false;
-  switch (e->key_code()) {
+  io.KeysDown[e.key_code()] = false;
+  switch (e.key_code()) {
     case 16: {
       io.KeyShift = false;
     } break;
@@ -598,8 +598,8 @@ void ImGuiDrawer::OnKeyUp(KeyEvent& e) {
 
 void ImGuiDrawer::OnKeyChar(KeyEvent& e) {
   auto& io = GetIO();
-  if (e->key_code() > 0 && e->key_code() < 0x10000) {
-    io.AddInputCharacter(e->key_code());
+  if (e.key_code() > 0 && e.key_code() < 0x10000) {
+    io.AddInputCharacter(e.key_code());
     e.set_handled(true);
   }
 }

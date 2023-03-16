@@ -135,6 +135,11 @@ dword_result_t DmMapDevkitDrive() {
 
   return X_STATUS_SUCCESS;
 }
+
+void DmMapDevkitDrive_entry(const ppc_context_t& ctx) {
+  // games check for nonzero result, failure if nz
+  ctx->r[3] = 0ULL;
+}
 DECLARE_XBDM_EXPORT1(DmMapDevkitDrive, kDebug, kStub);
 
 dword_result_t DmFindPdbSignature_entry(lpdword_t unk0_ptr,

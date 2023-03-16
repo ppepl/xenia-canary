@@ -91,17 +91,16 @@ class WinKeyInputDriver final : public InputDriver {
 
   xe::global_critical_region global_critical_region_;
   std::queue<KeyEvent> key_events_;
-  
+  std::vector<KeyBinding> key_bindings_;
+
   std::mutex mouse_mutex_;
   std::queue<MouseEvent> mouse_events_;
 
   std::mutex key_mutex_;
   bool key_states_[256];
-  
-  std::vector<KeyBinding> key_bindings_;
 
-  uint32_t packet_number_ = 1;
-  
+  uint32_t packet_number_;
+
   std::vector<std::unique_ptr<HookableGame>> hookable_games_;
 
   std::unordered_map<uint32_t, std::unordered_map<uint32_t, uint32_t>>

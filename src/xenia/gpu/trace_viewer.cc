@@ -167,7 +167,7 @@ void TraceViewer::TraceViewerWindowListener::OnClosing(xe::ui::UIEvent& e) {
 }
 
 void TraceViewer::TraceViewerWindowListener::OnKeyDown(xe::ui::KeyEvent& e) {
-  switch (e->key_code()) {
+  switch (e.key_code()) {
     case 0x74: /* VK_F5 */
       trace_viewer_.graphics_system_->ClearCaches();
       break;

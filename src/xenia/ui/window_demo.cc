@@ -109,7 +109,7 @@ void WindowDemoApp::WindowDemoWindowListener::OnClosing(UIEvent& e) {
 }
 
 void WindowDemoApp::WindowDemoWindowListener::OnKeyDown(KeyEvent& e) {
-  switch (e->key_code()) {
+  switch (e.key_code()) {
       case 0x72: {  // F3
       Profiler::ToggleDisplay();
       } break;

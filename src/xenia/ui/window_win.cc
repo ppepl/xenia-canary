@@ -1055,7 +1055,8 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
         auto e = MouseEvent(this, MouseEvent::Button::kNone, mouseData.lLastX,
                             mouseData.lLastY, mouseData.usButtonFlags,
                             (int16_t)mouseData.usButtonData);
-        OnRawMouse(&e);
+		WindowDestructionReceiver destruction_receiver(this);
+        OnRawMouse(e, destruction_receiver);
         return 0;
       } else if (rawinput_data_.header.dwType == RIM_TYPEKEYBOARD) {
         const auto& keyData = rawinput_data_.data.keyboard;
@@ -1165,8 +1166,8 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
 
         auto e = KeyEvent(this, vkey, 0, !(keyData.Flags & RI_KEY_BREAK), false,
                           false, false, false);
-
-        OnRawKeyboard(&e);
+		WindowDestructionReceiver destruction_receiver(this);
+        OnRawKeyboard(e, destruction_receiver);
         return 0;
       }
 
@@ -1289,10 +1290,6 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
     } break;
 
     case WM_SETFOCUS: {
-	  has_focus_ = true;
-      auto e = UIEvent(this);
-      OnGotFocus(&e);
-
       if (is_fullscreen()) {
         // Cursor bounds can be lost when focus is lost, reapply them...
         // TODO: can this go somewhere better?

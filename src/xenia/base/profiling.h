@@ -203,8 +203,8 @@ class Profiler {
 #if XE_OPTION_PROFILING
   class ProfilerWindowInputListener final : public ui::WindowInputListener {
    public:
-    void OnKeyDown(int key_code) override;
-    void OnKeyUp(int key_code) override;
+    static bool OnKeyDown(int key_code);
+    static bool OnKeyUp(int key_code);
 #if XE_OPTION_PROFILING_UI
     void OnMouseDown(ui::MouseEvent& e) override;
     void OnMouseMove(ui::MouseEvent& e) override;

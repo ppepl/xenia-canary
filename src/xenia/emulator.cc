@@ -71,8 +71,7 @@ DEFINE_bool(allow_game_relative_writes, false,
             "relative to game://. Used for "
             "generating test data to compare with original hardware. ",
             "General");
-
-
+			
 DEFINE_bool(ge_remove_blur, false,
             "(GoldenEye) Removes low-res blur when in classic-graphics mode", "MouseHook");
 DEFINE_bool(ge_debug_menu, false,
@@ -823,8 +822,6 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     XELOGE("Failed to load user module {}", xe::path_to_utf8(path));
     return X_STATUS_NOT_FOUND;
   }
-  
-  executable_path_ = path;
 
   X_RESULT result = kernel_state_->ApplyTitleUpdate(module);
   if (XFAILED(result)) {
@@ -838,6 +835,9 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     XELOGE("Failed to initialize user module {}", xe::path_to_utf8(path));
     return result;
   }
+  
+  executable_path_ = path;
+  
   // Grab the current title ID.
   xex2_opt_execution_info* info = nullptr;
   uint32_t workspace_address = 0;
@@ -1035,7 +1035,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
 
           break;
         }
-	 }
+	  }
 
   // Initializing the shader storage in a blocking way so the user doesn't
   // miss the initial seconds - for instance, sound from an intro video may

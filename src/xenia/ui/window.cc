@@ -54,46 +54,6 @@ Window::~Window() {
   }
 }
 
-void Window::ForEachListener(std::function<void(WindowListener*)> fn) {
-  assert_false(in_listener_loop_);
-  in_listener_loop_ = true;
-  for (auto listener : listeners_) {
-    fn(listener);
-  }
-  in_listener_loop_ = false;
-  while (!pending_listener_attaches_.empty()) {
-    auto listener = pending_listener_attaches_.back();
-    pending_listener_attaches_.pop_back();
-    AttachListener(listener);
-  }
-  while (!pending_listener_detaches_.empty()) {
-    auto listener = pending_listener_detaches_.back();
-    pending_listener_detaches_.pop_back();
-    DetachListener(listener);
-  }
-}
-
-void Window::TryForEachListener(std::function<bool(WindowListener*)> fn) {
-  assert_false(in_listener_loop_);
-  in_listener_loop_ = true;
-  for (auto listener : listeners_) {
-    if (fn(listener)) {
-      break;
-    }
-  }
-  in_listener_loop_ = false;
-  while (!pending_listener_attaches_.empty()) {
-    auto listener = pending_listener_attaches_.back();
-    pending_listener_attaches_.pop_back();
-    AttachListener(listener);
-  }
-  while (!pending_listener_detaches_.empty()) {
-    auto listener = pending_listener_detaches_.back();
-    pending_listener_detaches_.pop_back();
-    DetachListener(listener);
-  }
-}
-
 void Window::AddListener(WindowListener* listener) {
   assert_not_null(listener);
   // Check if already added.
@@ -594,10 +554,6 @@ void Window::OnFileDrop(FileDropEvent& e,
   }
 }
 
-void Window::OnGotFocus(UIEvent* e) {
-  ForEachListener([e](auto listener) { listener->OnGotFocus(e); });
-}
-
 void Window::OnKeyDown(KeyEvent& e,
                        WindowDestructionReceiver& destruction_receiver) {
   PropagateEventThroughInputListeners(
@@ -689,26 +645,30 @@ void Window::OnMouseWheel(MouseEvent& e,
   }
 }
 
-void Window::OnRawMouse(MouseEvent* e) {
-  on_raw_mouse(e);
-  if (e->is_handled()) {
+void Window::OnRawMouse(MouseEvent& e,
+                          WindowDestructionReceiver& destruction_receiver) {
+  PropagateEventThroughInputListeners(
+      [&e](auto listener) {
+    listener->OnRawMouse(e);
+    return e.is_handled();
+	  },
+      destruction_receiver);
+  if (destruction_receiver.IsWindowDestroyed()) {
     return;
   }
-  TryForEachListener([e](auto listener) {
-    listener->OnRawMouse(e);
-    return e->is_handled();
-  });
 }
 
-void Window::OnRawKeyboard(KeyEvent* e) {
-  on_raw_keyboard(e);
-  if (e->is_handled()) {
+void Window::OnRawKeyboard(KeyEvent& e,
+                          WindowDestructionReceiver& destruction_receiver) {
+  PropagateEventThroughInputListeners(
+      [&e](auto listener) {
+    listener->OnRawKeyboard(e);
+    return e.is_handled();
+	  },
+      destruction_receiver);
+  if (destruction_receiver.IsWindowDestroyed()) {
     return;
   }
-  TryForEachListener([e](auto listener) {
-    listener->OnRawKeyboard(e);
-    return e->is_handled();
-  });
 }
 
 void Window::OnTouchEvent(TouchEvent& e,
