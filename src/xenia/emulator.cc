@@ -60,22 +60,24 @@ DECLARE_int32(user_language);
 DEFINE_double(time_scalar, 1.0,
               "Scalar used to speed or slow time (1x, 2x, 1/2x, etc).",
               "General");
+
 DEFINE_string(
     launch_module, "",
     "Executable to launch from the .iso or the package instead of default.xex "
     "or the module specified by the game. Leave blank to launch the default "
     "module.",
     "General");
+	
+DEFINE_bool(ge_remove_blur, false,
+            "(GoldenEye) Removes low-res blur when in classic-graphics mode", "MouseHook");
+DEFINE_bool(ge_debug_menu, false,
+            "(GoldenEye) Enables the debug menu, accessible with LB/1", "MouseHook");
+
 DEFINE_bool(allow_game_relative_writes, false,
             "Not useful to non-developers. Allows code to write to paths "
             "relative to game://. Used for "
             "generating test data to compare with original hardware. ",
             "General");
-			
-DEFINE_bool(ge_remove_blur, false,
-            "(GoldenEye) Removes low-res blur when in classic-graphics mode", "MouseHook");
-DEFINE_bool(ge_debug_menu, false,
-            "(GoldenEye) Enables the debug menu, accessible with LB/1", "MouseHook");
 
 namespace xe {
 using namespace xe::literals;
@@ -903,8 +905,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       }
     }
   }
-
-    auto patch_addr = [module](uint32_t addr, uint32_t value) {
+  
+  auto patch_addr = [module](uint32_t addr, uint32_t value) {
         auto* patch_ptr =
             (xe::be<uint32_t>*)module->memory()->TranslateVirtual(addr);
         auto heap = module->memory()->LookupHeap(addr);
@@ -1035,7 +1037,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
 
           break;
         }
-	  }
+    }
 
   // Initializing the shader storage in a blocking way so the user doesn't
   // miss the initial seconds - for instance, sound from an intro video may
