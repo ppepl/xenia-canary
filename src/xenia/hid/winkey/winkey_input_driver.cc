@@ -18,6 +18,9 @@
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_win.h"
 
+#include "xenia/emulator.h"
+#include "xenia/kernel/kernel_state.h"
+
 #include "xenia/hid/winkey/hookables/goldeneye.h"
 #include "xenia/hid/winkey/hookables/halo3.h"
 
@@ -488,7 +491,8 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
 
   RawInputState state;
 
-  if (window()->HasFocus() && is_active()) {
+  const Emulator* emulator = xe::kernel::kernel_state()->emulator();
+  if (window()->HasFocus() && is_active() && emulator->is_title_open()) {
     {
       std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
       while (!mouse_events_.empty()) {
@@ -593,15 +597,18 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
 
   // Check if we have any hooks/injections for the current game
   bool game_modifier_handled = false;
-  for (auto& game : hookable_games_) {
-    if (game->IsGameSupported()) {
-      std::unique_lock<std::mutex> key_lock(key_mutex_);
-      game->DoHooks(user_index, state, out_state);
-      if (modifier_pressed) {
-        game_modifier_handled =
-            game->ModifierKeyHandler(user_index, state, out_state);
+  if (emulator->is_title_open())
+  {
+    for (auto& game : hookable_games_) {
+      if (game->IsGameSupported()) {
+        std::unique_lock<std::mutex> key_lock(key_mutex_);
+        game->DoHooks(user_index, state, out_state);
+        if (modifier_pressed) {
+          game_modifier_handled =
+              game->ModifierKeyHandler(user_index, state, out_state);
+        }
+        break;
       }
-      break;
     }
   }
 
