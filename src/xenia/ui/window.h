@@ -352,6 +352,15 @@ class Window {
     }
   }
   
+  Delegate<KeyEvent*> on_key_down;
+  Delegate<KeyEvent*> on_key_up;
+  Delegate<KeyEvent*> on_key_char;
+
+  Delegate<MouseEvent*> on_mouse_down;
+  Delegate<MouseEvent*> on_mouse_move;
+  Delegate<MouseEvent*> on_mouse_up;
+  Delegate<MouseEvent*> on_mouse_wheel;
+  
   Delegate<MouseEvent*> on_raw_mouse;
   Delegate<KeyEvent*> on_raw_keyboard;
 

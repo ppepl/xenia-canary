@@ -211,7 +211,7 @@ bool GoldeneyeGame::DoHooks(uint32_t user_index, RawInputState& input_state,
           kernel_memory()->TranslateVirtual<xe::be<uint32_t>*>(
               game_addrs.settings_addr);
 
-      if (settings_ptr) {
+      if (*settings_ptr) {
 
         // GE points to settings struct which gets allocated somewhere random in memory
         // PD's settings always seem to be in .data section though
