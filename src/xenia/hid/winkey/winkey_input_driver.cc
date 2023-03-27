@@ -379,7 +379,7 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window,
   }
 
   // Register our event listeners
-  window->on_raw_mouse.AddListener([this](ui::MouseEvent* evt) {
+  window->on_raw_mouse.AddListener([this](ui::MouseEvent& evt) {
     if (!is_active()) {
       return;
     }
@@ -387,10 +387,10 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window,
     std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
 
     MouseEvent mouse;
-    mouse.x_delta = evt->x();
-    mouse.y_delta = evt->y();
-    mouse.buttons = evt->scroll_x();
-    mouse.wheel_delta = evt->scroll_y();
+    mouse.x_delta = evt.x();
+    mouse.y_delta = evt.y();
+    mouse.buttons = evt.scroll_x();
+    mouse.wheel_delta = evt.scroll_y();
     mouse_events_.push(mouse);
 
     {
@@ -428,16 +428,43 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window,
     }
   });
 
-  window->on_raw_keyboard.AddListener([this, window](ui::KeyEvent* evt) {
+  window->on_raw_keyboard.AddListener([this, window](ui::KeyEvent& evt) {
     if (!is_active()) {
       return;
     }
 
     std::unique_lock<std::mutex> key_lock(key_mutex_);
-    key_states_[evt->key_code() & 0xFF] = evt->prev_state();
+    key_states_[evt.key_code() & 0xFF] = evt.prev_state();
   });
   
   window->AddInputListener(&window_input_listener_, window_z_order);
+
+  window->on_key_down.AddListener([this](ui::KeyEvent& evt) {
+    if (!is_active()) {
+      return;
+    }
+    auto global_lock = global_critical_region_.Acquire();
+
+    KeyEvent key;
+    key.vkey = evt.key_code();
+    key.transition = true;
+    key.prev_state = evt.prev_state();
+    key.repeat_count = evt.repeat_count();
+    key_events_.push(key);
+  });
+  window->on_key_up.AddListener([this](ui::KeyEvent& evt) {
+    if (!is_active()) {
+      return;
+    }
+    auto global_lock = global_critical_region_.Acquire();
+
+    KeyEvent key;
+    key.vkey = evt.key_code();
+    key.transition = false;
+    key.prev_state = evt.prev_state();
+    key.repeat_count = evt.repeat_count();
+    key_events_.push(key);
+  });
 }
 
 WinKeyInputDriver::~WinKeyInputDriver() {

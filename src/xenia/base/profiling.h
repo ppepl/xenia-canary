@@ -206,10 +206,10 @@ class Profiler {
     static void OnKeyDown(ui::KeyEvent& e, int key_code);
     static void OnKeyUp(ui::KeyEvent& e, int key_code);
 #if XE_OPTION_PROFILING_UI
-    static void OnMouseDown(ui::MouseEvent* e);
-    static void OnMouseMove(ui::MouseEvent* e);
-    static void OnMouseUp(ui::MouseEvent* e);
-    static void OnMouseWheel(ui::MouseEvent* e);
+    static void OnMouseDown(ui::MouseEvent& e);
+    static void OnMouseMove(ui::MouseEvent& e);
+    static void OnMouseUp(ui::MouseEvent& e);
+    static void OnMouseWheel(ui::MouseEvent& e);
 #endif  // XE_OPTION_PROFILING_UI
   };
   // For now, no need for OnDpiChanged in a WindowListener because redrawing is

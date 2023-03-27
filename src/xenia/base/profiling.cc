@@ -172,30 +172,30 @@ void Profiler::ProfilerWindowInputListener::OnKeyUp(ui::KeyEvent& e, int key_cod
 
 #if XE_OPTION_PROFILING_UI
 
-void Profiler::ProfilerWindowInputListener::OnMouseDown(ui::MouseEvent* e) {
-  Profiler::SetMousePosition(e->x(), e->y(), 0);
-  MicroProfileMouseButton(e->button() == ui::MouseEvent::Button::kLeft,
-                          e->button() == ui::MouseEvent::Button::kRight);
-  e->set_handled(true);
+void Profiler::ProfilerWindowInputListener::OnMouseDown(ui::MouseEvent& e) {
+  Profiler::SetMousePosition(e.x(), e.y(), 0);
+  MicroProfileMouseButton(e.button() == ui::MouseEvent::Button::kLeft,
+                          e.button() == ui::MouseEvent::Button::kRight);
+  e.set_handled(true);
   PostInputEvent();
 }
 
-void Profiler::ProfilerWindowInputListener::OnMouseUp(ui::MouseEvent* e) {
-  Profiler::SetMousePosition(e->x(), e->y(), 0);
+void Profiler::ProfilerWindowInputListener::OnMouseUp(ui::MouseEvent& e) {
+  Profiler::SetMousePosition(e.x(), e.y(), 0);
   MicroProfileMouseButton(0, 0);
-  e->set_handled(true);
+  e.set_handled(true);
   PostInputEvent();
 }
 
-void Profiler::ProfilerWindowInputListener::OnMouseMove(ui::MouseEvent* e) {
-  Profiler::SetMousePosition(e->x(), e->y(), 0);
-  e->set_handled(true);
+void Profiler::ProfilerWindowInputListener::OnMouseMove(ui::MouseEvent& e) {
+  Profiler::SetMousePosition(e.x(), e.y(), 0);
+  e.set_handled(true);
   PostInputEvent();
 }
 
-void Profiler::ProfilerWindowInputListener::OnMouseWheel(ui::MouseEvent* e) {
-  Profiler::SetMousePosition(e->x(), e->y(), e->scroll_y());
-  e->set_handled(true);
+void Profiler::ProfilerWindowInputListener::OnMouseWheel(ui::MouseEvent& e) {
+  Profiler::SetMousePosition(e.x(), e.y(), e.scroll_y());
+  e.set_handled(true);
   PostInputEvent();
 }
 
@@ -272,42 +272,42 @@ void Profiler::SetUserIO(size_t z_order, ui::Window* window,
   }
 
   // Pass through mouse events.
-  window_->on_mouse_down.AddListener([](ui::MouseEvent* e) {
+  window_->on_mouse_down.AddListener([](ui::MouseEvent& e) {
     if (Profiler::is_visible()) {
       Profiler::ProfilerWindowInputListener::OnMouseDown(e);
-      e->set_handled(true);
+      e.set_handled(true);
     }
   });
-  window_->on_mouse_up.AddListener([](ui::MouseEvent* e) {
+  window_->on_mouse_up.AddListener([](ui::MouseEvent& e) {
     if (Profiler::is_visible()) {
       Profiler::ProfilerWindowInputListener::OnMouseUp(e);
-      e->set_handled(true);
+      e.set_handled(true);
     }
   });
-  window_->on_mouse_move.AddListener([](ui::MouseEvent* e) {
+  window_->on_mouse_move.AddListener([](ui::MouseEvent& e) {
     if (Profiler::is_visible()) {
       Profiler::ProfilerWindowInputListener::OnMouseMove(e);
-      e->set_handled(true);
+      e.set_handled(true);
     }
   });
-  window_->on_mouse_wheel.AddListener([](ui::MouseEvent* e) {
+  window_->on_mouse_wheel.AddListener([](ui::MouseEvent& e) {
     if (Profiler::is_visible()) {
       Profiler::ProfilerWindowInputListener::OnMouseWheel(e);
-      e->set_handled(true);
+      e.set_handled(true);
     }
   });
 
   // Watch for toggle/mode keys and such.
-  window_->on_key_down.AddListener([](ui::KeyEvent* e) {
+  window_->on_key_down.AddListener([](ui::KeyEvent& e) {
     if (Profiler::is_visible()) {
-      Profiler::ProfilerWindowInputListener::OnKeyDown(*e, e->key_code());
-      e->set_handled(true);
+      Profiler::ProfilerWindowInputListener::OnKeyDown(e, e.key_code());
+      e.set_handled(true);
     }
   });
-  window_->on_key_up.AddListener([](ui::KeyEvent* e) {
+  window_->on_key_up.AddListener([](ui::KeyEvent& e) {
     if (Profiler::is_visible()) {
-      Profiler::ProfilerWindowInputListener::OnKeyUp(*e, e->key_code());
-      e->set_handled(true);
+      Profiler::ProfilerWindowInputListener::OnKeyUp(e, e.key_code());
+      e.set_handled(true);
     }
   });
 }
