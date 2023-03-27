@@ -18,7 +18,6 @@
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_win.h"
 
-#include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 
 #include "xenia/hid/winkey/hookables/goldeneye.h"
@@ -518,100 +517,100 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
 
   RawInputState state;
 
-  const Emulator* emulator = xe::kernel::kernel_state()->emulator();
-  if (window()->HasFocus() && is_active() && emulator->is_title_open()) {
-    {
-      std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
-      while (!mouse_events_.empty()) {
-        auto& mouse = mouse_events_.front();
-        state.mouse.x_delta += mouse.x_delta;
-        state.mouse.y_delta += mouse.y_delta;
-        state.mouse.wheel_delta += mouse.wheel_delta;
-        mouse_events_.pop();
-      }
-    }
-
-    if (state.mouse.wheel_delta != 0) {
-      if (cvars::swap_wheel) {
-        state.mouse.wheel_delta = -state.mouse.wheel_delta;
-      }
-    }
-
-    {
-      std::unique_lock<std::mutex> key_lock(key_mutex_);
-      state.key_states = key_states_;
-
-      // Handle key bindings
-      uint32_t cur_game = xe::kernel::kernel_state()->title_id();
-      if (!key_binds_.count(cur_game)) {
-        cur_game = kTitleIdDefaultBindings;
-      }
-      if (key_binds_.count(cur_game)) {
-        auto& binds = key_binds_.at(cur_game);
-        auto process_binding = [binds, &buttons, &left_trigger, &right_trigger,
-                                &thumb_lx, &thumb_ly, &thumb_rx, &thumb_ry,
-                                &modifier_pressed](uint32_t key) {
-          if (!binds.count(key)) {
-            return;
-          }
-          auto binding = binds.at(key);
-          buttons |= (binding & XINPUT_BUTTONS_MASK);
-
-          if (binding & XINPUT_BIND_LEFT_TRIGGER) {
-            left_trigger = 0xFF;
-          }
-
-          if (binding & XINPUT_BIND_RIGHT_TRIGGER) {
-            right_trigger = 0xFF;
-          }
-
-          if (binding & XINPUT_BIND_LS_UP) {
-            thumb_ly = SHRT_MAX;
-          }
-          if (binding & XINPUT_BIND_LS_DOWN) {
-            thumb_ly = SHRT_MIN;
-          }
-          if (binding & XINPUT_BIND_LS_LEFT) {
-            thumb_lx = SHRT_MIN;
-          }
-          if (binding & XINPUT_BIND_LS_RIGHT) {
-            thumb_lx = SHRT_MAX;
-          }
-
-          if (binding & XINPUT_BIND_RS_UP) {
-            thumb_ry = SHRT_MAX;
-          }
-          if (binding & XINPUT_BIND_RS_DOWN) {
-            thumb_ry = SHRT_MIN;
-          }
-          if (binding & XINPUT_BIND_RS_LEFT) {
-            thumb_rx = SHRT_MIN;
-          }
-          if (binding & XINPUT_BIND_RS_RIGHT) {
-            thumb_rx = SHRT_MAX;
-          }
-
-          if (binding & XINPUT_BIND_MODIFIER) {
-            modifier_pressed = true;
-          }
-        };
-
-        if (state.mouse.wheel_delta != 0) {
-          if (state.mouse.wheel_delta > 0) {
-            process_binding(VK_BIND_MWHEELUP);
-          } else {
-            process_binding(VK_BIND_MWHEELDOWN);
-          }
-        }
-
-        for (int i = 0; i < 0x100; i++) {
-          if (key_states_[i]) {
-            process_binding(i);
-          }
+  if (window()->HasFocus() && is_active() && xe::kernel::kernel_state()->has_executable_module()) {
+      {
+        std::unique_lock<std::mutex> mouse_lock(mouse_mutex_);
+        while (!mouse_events_.empty()) {
+          auto& mouse = mouse_events_.front();
+          state.mouse.x_delta += mouse.x_delta;
+          state.mouse.y_delta += mouse.y_delta;
+          state.mouse.wheel_delta += mouse.wheel_delta;
+          mouse_events_.pop();
         }
       }
+
+      if (state.mouse.wheel_delta != 0) {
+        if (cvars::swap_wheel) {
+          state.mouse.wheel_delta = -state.mouse.wheel_delta;
+        }
+      }
+
+      {
+        std::unique_lock<std::mutex> key_lock(key_mutex_);
+        state.key_states = key_states_;
+
+        // Handle key bindings
+        uint32_t cur_game = xe::kernel::kernel_state()->title_id();
+        if (!key_binds_.count(cur_game)) {
+          cur_game = kTitleIdDefaultBindings;
+        }
+        if (key_binds_.count(cur_game)) {
+          auto& binds = key_binds_.at(cur_game);
+          auto process_binding = [binds, &buttons, &left_trigger,
+                                  &right_trigger, &thumb_lx, &thumb_ly,
+                                  &thumb_rx, &thumb_ry,
+                                  &modifier_pressed](uint32_t key) {
+            if (!binds.count(key)) {
+              return;
+            }
+            auto binding = binds.at(key);
+            buttons |= (binding & XINPUT_BUTTONS_MASK);
+
+            if (binding & XINPUT_BIND_LEFT_TRIGGER) {
+              left_trigger = 0xFF;
+            }
+
+            if (binding & XINPUT_BIND_RIGHT_TRIGGER) {
+              right_trigger = 0xFF;
+            }
+
+            if (binding & XINPUT_BIND_LS_UP) {
+              thumb_ly = SHRT_MAX;
+            }
+            if (binding & XINPUT_BIND_LS_DOWN) {
+              thumb_ly = SHRT_MIN;
+            }
+            if (binding & XINPUT_BIND_LS_LEFT) {
+              thumb_lx = SHRT_MIN;
+            }
+            if (binding & XINPUT_BIND_LS_RIGHT) {
+              thumb_lx = SHRT_MAX;
+            }
+
+            if (binding & XINPUT_BIND_RS_UP) {
+              thumb_ry = SHRT_MAX;
+            }
+            if (binding & XINPUT_BIND_RS_DOWN) {
+              thumb_ry = SHRT_MIN;
+            }
+            if (binding & XINPUT_BIND_RS_LEFT) {
+              thumb_rx = SHRT_MIN;
+            }
+            if (binding & XINPUT_BIND_RS_RIGHT) {
+              thumb_rx = SHRT_MAX;
+            }
+
+            if (binding & XINPUT_BIND_MODIFIER) {
+              modifier_pressed = true;
+            }
+          };
+
+          if (state.mouse.wheel_delta != 0) {
+            if (state.mouse.wheel_delta > 0) {
+              process_binding(VK_BIND_MWHEELUP);
+            } else {
+              process_binding(VK_BIND_MWHEELDOWN);
+            }
+          }
+
+          for (int i = 0; i < 0x100; i++) {
+            if (key_states_[i]) {
+              process_binding(i);
+            }
+          }
+        }
+      }
     }
-  }
 
   out_state->packet_number = packet_number_;
   out_state->gamepad.buttons = buttons;
@@ -624,20 +623,20 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
 
   // Check if we have any hooks/injections for the current game
   bool game_modifier_handled = false;
-  if (emulator->is_title_open())
-  {
-    for (auto& game : hookable_games_) {
-      if (game->IsGameSupported()) {
-        std::unique_lock<std::mutex> key_lock(key_mutex_);
-        game->DoHooks(user_index, state, out_state);
-        if (modifier_pressed) {
-          game_modifier_handled =
-              game->ModifierKeyHandler(user_index, state, out_state);
+    if (xe::kernel::kernel_state()->has_executable_module())
+    {
+        for (auto& game : hookable_games_) {
+          if (game->IsGameSupported()) {
+            std::unique_lock<std::mutex> key_lock(key_mutex_);
+            game->DoHooks(user_index, state, out_state);
+            if (modifier_pressed) {
+              game_modifier_handled =
+                  game->ModifierKeyHandler(user_index, state, out_state);
+            }
+            break;
+          }
         }
-        break;
       }
-    }
-  }
 
   if (!game_modifier_handled && modifier_pressed) {
     // Modifier not handled by any supported game class, apply default modifier
