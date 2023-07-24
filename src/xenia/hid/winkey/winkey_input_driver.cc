@@ -17,6 +17,7 @@
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_win.h"
+#include "xenia/base/system.h"
 
 #include "xenia/kernel/kernel_state.h"
 
@@ -301,11 +302,9 @@ WinKeyInputDriver::WinKeyInputDriver(xe::ui::Window* window,
   // Read bindings file if it exists
   std::ifstream binds("bindings.ini");
   if (!binds.is_open()) {
-    /*MessageBox(((xe::ui::Win32Window*)window)->hwnd(),
-               L"Xenia failed to load bindings.ini file, MouseHook won't have "
-               "any keys bound!",
-               L"Xenia", MB_ICONEXCLAMATION | MB_SYSTEMMODAL);*/
-// error C2440: 'type cast': cannot convert from 'overloaded-function' to 'xe::ui::Win32Window *'
+    xe::ShowSimpleMessageBox(
+        xe::SimpleMessageBoxType::Warning,
+               "Xenia failed to load bindings.ini file, MouseHook won't have any keys bound!");
   } else {
     std::string cur_section = "default";
     uint32_t cur_game = kTitleIdDefaultBindings;
