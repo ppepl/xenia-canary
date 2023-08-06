@@ -31,6 +31,7 @@
 #include "xenia/cpu/backend/null_backend.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/thread_state.h"
+#include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/hid/input_driver.h"
 #include "xenia/hid/input_system.h"
@@ -56,8 +57,6 @@
 #include "xenia/cpu/backend/x64/x64_backend.h"
 #endif  // XE_ARCH
 
-DECLARE_int32(user_language);
-
 DEFINE_double(time_scalar, 1.0,
               "Scalar used to speed or slow time (1x, 2x, 1/2x, etc).",
               "General");
@@ -79,6 +78,10 @@ DEFINE_bool(allow_game_relative_writes, false,
             "relative to game://. Used for "
             "generating test data to compare with original hardware. ",
             "General");
+
+DECLARE_int32(user_language);
+
+DECLARE_bool(allow_plugins);
 
 namespace xe {
 using namespace xe::literals;
@@ -268,6 +271,9 @@ X_STATUS Emulator::Setup(
   // Shared kernel state.
   kernel_state_ = std::make_unique<xe::kernel::KernelState>(this);
 
+  plugin_loader_ = std::make_unique<xe::patcher::PluginLoader>(
+      kernel_state_.get(), storage_root() / "plugins");
+
   // Setup the core components.
   result = graphics_system_->Setup(
       processor_.get(), kernel_state_.get(),
@@ -395,9 +401,12 @@ X_STATUS Emulator::MountPath(const std::filesystem::path& path,
 
   file_system_->UnregisterSymbolicLink("d:");
   file_system_->UnregisterSymbolicLink("game:");
+  file_system_->UnregisterSymbolicLink("plugins:");
+
   // Create symlinks to the device.
   file_system_->RegisterSymbolicLink("game:", mount_path);
   file_system_->RegisterSymbolicLink("d:", mount_path);
+
   return X_STATUS_SUCCESS;
 }
 
@@ -943,7 +952,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       title_version_ = format_version(title_version);
     }
   }
-
+ 
   // Try and load the resource database (xex only).
   if (module->title_id()) {
     auto title_id = fmt::format("{:08X}", module->title_id());
@@ -1136,6 +1145,16 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   }
   main_thread_ = main_thread;
   on_launch(title_id_.value(), title_name_);
+
+  // Plugins must be loaded after calling LaunchModule() and
+  // FinishLoadingUserModule() which will apply TUs and patching to the main
+  // xex.
+  if (cvars::allow_plugins) {
+    if (plugin_loader_->IsAnyPluginForTitleAvailable(title_id_.value(),
+                                                     module->hash().value())) {
+      plugin_loader_->LoadTitlePlugins(title_id_.value());
+    }
+  }
 
   return X_STATUS_SUCCESS;
 }
