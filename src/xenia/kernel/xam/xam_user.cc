@@ -177,7 +177,7 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index,
     xuid_count = 1;
     if (kernel_state()->IsUserSignedIn(user_index)) {
       const auto& user_profile = kernel_state()->user_profile(user_index);
-      assert_true(static_cast<uint64_t>(xuids[0]) == user_profile->xuid());
+      //assert_true(static_cast<uint64_t>(xuids[0]) == user_profile->xuid());
     }
   }
   assert_zero(unk);  // probably flags
@@ -803,6 +803,8 @@ dword_result_t XamWriteGamerTile_entry(dword_t arg1, dword_t arg2, dword_t arg3,
 DECLARE_XAM_EXPORT1(XamWriteGamerTile, kUserProfiles, kStub);
 
 dword_result_t XamSessionCreateHandle_entry(lpdword_t handle_ptr) {
+  // Generate random session id?
+
   std::random_device rd;
   std::uniform_int_distribution<uint32_t> dist(0, 0xFFFFFFFF);
   *handle_ptr = dist(rd);

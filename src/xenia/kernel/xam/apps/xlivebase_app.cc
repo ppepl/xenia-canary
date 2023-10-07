@@ -73,6 +73,10 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
              buffer_length);
       return X_E_SUCCESS;
     }
+    case 0x00058017: {
+      XELOGD("UserFindUsers({:08X}, {:08X})", buffer_ptr, buffer_length);
+      return X_E_FAIL;
+    }
   }
   XELOGE(
       "Unimplemented XLIVEBASE message app={:08X}, msg={:08X}, arg1={:08X}, "

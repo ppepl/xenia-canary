@@ -1,11 +1,10 @@
 # Netplay Fork
 
-This is a fork of [Xenia-Canary Netplay](https://github.com/craftycodie/sunrise-xenia-canary-netplay) which implements Online Multiplayer features.
+This is a fork of [Xenia-Canary Netplay](https://github.com/craftycodie/sunrise-xenia-canary-netplay) which implements online multiplayer features.
 It has been built from the ground up and tested primarily with Halo 3, though other games are supported.
 In it's current state, the fork is very rough and not PR ready. Check out the [Issues](https://github.com/craftycodie/xenia-canary-netplay/issues) list for more on that.
-Please excuse the mess, I don't use C++ often and rushed this together in a couple of restless weeks. The code will improve in future.
 
-The web API powering this fork can be found [here](https://github.com/craftycodie/Xenia-WebServices)
+The web API powering this fork can be found [here](https://github.com/AdrianCassar/Xenia-WebServices).
 
 Massive thanks to @SarahGreyWolf for testing this fork with me for about a month, couldn't have done it without her.
 Also, thank you to @Bo98 for creating the burnout5 xenia fork, I used that as a basis for this, and some of the code is still here I think.
@@ -14,7 +13,88 @@ Peace and hair grease
 
 Codie
 
+## FAQ:
+
+Is UPnP implemented?
+- Yes, **UPnP** is now implemented therefore manual port forwarding is no longer required.
+
+Is **Systemlink** supported?
+
+- No, Systemlink is not supported.
+
+Can I host the Xenia Web Services?
+
+- Yes, [Xenia Web Services](https://github.com/AdrianCassar/Xenia-WebServices).
+
+Is there a Netplay mousehook build?
+
+- Yes, download it from [Netplay Mousehook](https://github.com/marinesciencedude/xenia-canary-mousehook/releases?q=Netplay).
+
+Are games dependant on servers?
+
+- Yes a lot of games are dependant on servers therefore will not work, unless a server is developed for that game. For example many games requires EA servers, without them netplay will not work. 
+
+Can I use multiple instances for the same game?
+
+- No, you cannot use multiple instances due to the first instance using up ports. You will need to use a VM.
+
+Can I use multiple PCs on the same network?
+
+- No, you currently cannot use different PCs on the same network to connect to a session hosted on the same network.
+
+Where can I **download** the Canary Netplay build?
+
+- You can download it from the CI/CD builds [here](https://github.com/AdrianCassar/xenia-canary/actions/workflows/CI.yml?query=branch%3Anetplay_canary_experimental). You must be logged into your Github account to download CI/CD builds.
+
+## Config Setup
+
+To connect to a **Xenia WebServices** server you can either privately host it yourself or connect to my server.
+
+Do **NOT** add a forward slash at the end of the URL otherwise the requests will fail!
+```toml
+api_address = "https://xenia-netplay-2a0298c0e3f4.herokuapp.com"
+```
+
+UPnP is disabled by default, you can enable it in the config.
+```toml
+upnp = "true"
+```
+
+## Supported Games
+- Halo 3 Multiplayer (ODST Disc 2) v13.2 using [Sunrise Server](https://github.com/ahnewark/Sunrise-Halo3-WebServices)
+    - [Netplay Mousehook](https://github.com/AdrianCassar/xenia-canary/actions/workflows/CI.yml?query=branch%3Anetplay_mousehook_canary_experimental) supports Halo 3.
+
+- GTA V TU 2-13 (very unstable)
+- GTA V Beta [YT Video](https://www.youtube.com/watch?v=YIBjy5ZJcq4)
+
+- Source
+    - Left 4 Dead 2
+    - Left 4 Dead 2 Demo
+    - Portal 2
+    - CS:GO
+    - CS:GO Beta
+    - TF2
+
+- Saints Row
+    - Saints Row 2
+    - Saints Row 3 (unplayable)
+    - Saints Row 4 (unplayable)
+
+- Gundam Operation Troy
+
 ---
+
+### Non-Supported Games
+- Minecraft
+- Quantum of a Solace
+#### Requires Servers
+- Fight Night Champion
+- LOTR: Conquest
+- Skate 3
+- NFS Most Wanted
+- Chromehounds
+- GoldenEye 007
+- All CoDs
 
 <p align="center">
     <a href="https://github.com/xenia-project/xenia/tree/master/assets/icon">

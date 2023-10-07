@@ -250,7 +250,7 @@ dword_result_t NtSetInformationFile_entry(
     }
     default:
       // Unsupported, for now.
-      assert_always();
+      //assert_always();
       out_length = 0;
       break;
   }
