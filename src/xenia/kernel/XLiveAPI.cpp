@@ -40,6 +40,7 @@ using namespace rapidjson;
 // XSessionArbitration
 //
 // Use the overlapped task for asynchronous curl requests.
+// asynchronous UPnP
 // Reduce QoS spam
 // JSON deserialization instead of structs
 // XSession Object
@@ -1017,6 +1018,8 @@ unsigned char* XLiveAPI::GenerateMacAddress() {
 
 unsigned char* XLiveAPI::GetMACaddress() {
   XELOGI("Resolving system mac address.");
+
+  return GenerateMacAddress();
 
 #ifdef WIN32
   DWORD dwRetval = 0;
